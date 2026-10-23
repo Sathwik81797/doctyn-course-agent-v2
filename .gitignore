@@ -13,3 +13,4 @@ input/.replaced/
 .env*
 
 .data/
+input/
