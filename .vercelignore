@@ -8,3 +8,7 @@ node_modules/
 *.mp3
 *.mp4
 *.wav
+
+.data/
+Dockerfile.worker
+docker-compose.yml

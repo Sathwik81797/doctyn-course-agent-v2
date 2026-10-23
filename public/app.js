@@ -1,3 +1,5 @@
+import { cloudView, setupCloud, show as showCloud } from "./cloud.js";
+
 // Doctyn Course Studio — dashboard UI.
 // Everything shown here comes from the local engine (npm run dashboard). Nothing is simulated:
 // when the engine is not reachable the page says so and disables the actions.
@@ -715,7 +717,12 @@ function setupSettings() {
 // ---------- navigation (dashboard <-> AI Animation Studio, one page, one server) ----------
 
 function currentView() {
-  return location.hash.startsWith("#/studio") ? "studio" : "dashboard";
+  const cloud = cloudView();
+  if (cloud) return cloud;
+  if (location.hash.startsWith("#/studio")) return "studio";
+  // The hosted site opens on the cloud workspace; the local engine page keeps the original dashboard.
+  if (!location.hash && location.protocol === "https:") return "cloud";
+  return "dashboard";
 }
 
 function syncStudioFrame() {
@@ -732,6 +739,11 @@ function showView() {
   const view = currentView();
   $("dashboard-view").hidden = view !== "dashboard";
   $("studio-view").hidden = view !== "studio";
+  for (const v of ["cloud", "review", "admin"]) $(v + "-view").hidden = view !== v;
+  if (["cloud", "review", "admin"].includes(view)) {
+    if (!cloudView()) location.hash = "#/cloud";
+    showCloud();
+  }
   document.body.dataset.view = view;
   document.querySelectorAll(".nav-link").forEach((a) => {
     if (a.dataset.view === view) a.setAttribute("aria-current", "page");
@@ -770,3 +782,4 @@ function boot() {
 }
 
 boot();
+setupCloud();

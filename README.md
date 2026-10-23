@@ -386,3 +386,10 @@ npm run animate -- verify                     # duration, audio per slide, 1920x
 * Exact timing needs audio: run `npm run build-course` (or `preview-tts`) first, then `npm run animate -- analyze --force`. Without audio, durations are estimated from word count.
 * `analyze --ai` optionally asks OpenAI to choose the template and write pop-ups (paid, needs `OPENAI_API_KEY`; `ANIMATION_AI_MODEL` to override the model). Nothing else calls an API.
 * Edits made in the studio live in `animation/plan.json`; the source PPTX/DOCX are never modified.
+
+---
+
+## Cloud platform (multi-user)
+
+A hosted, multi-user version (accounts, private workspaces, background rendering, medical review, admin) lives alongside the local tool.
+See [docs/CLOUD.md](docs/CLOUD.md). Try it locally with `npm run cloud:dev`.

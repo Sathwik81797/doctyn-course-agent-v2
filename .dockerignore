@@ -1,0 +1,9 @@
+node_modules
+.data
+output
+input
+temp
+models
+.env*
+.git
+public

@@ -11,3 +11,5 @@ models/
 .vercel
 input/.replaced/
 .env*
+
+.data/

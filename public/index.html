@@ -24,10 +24,14 @@
         </span>
       </a>
       <nav class="main-nav" aria-label="Main">
-        <a href="#/" class="nav-link" data-view="dashboard">Dashboard</a>
+        <a href="#/cloud" class="nav-link" data-view="cloud">My Courses</a>
+        <a href="#/review" class="nav-link" data-view="review" data-needs-role="reviewer,admin" hidden>Medical Review</a>
+        <a href="#/admin" class="nav-link" data-view="admin" data-needs-role="admin" hidden>Admin</a>
+        <a href="#/" class="nav-link" data-view="dashboard">Local Engine</a>
         <a href="#/studio" class="nav-link" data-view="studio">AI Animation Studio</a>
       </nav>
       <div class="topbar-actions">
+        <div class="account" id="account"></div>
         <button type="button" class="status-pill" id="status-pill" data-state="checking" aria-live="polite">
           <span class="dot" aria-hidden="true"></span>
           <span id="status-text">Connecting…</span>
@@ -221,6 +225,10 @@
     <iframe id="studio-frame" title="AI Animation Studio" data-src="/studio/?embed=1"></iframe>
   </section>
 
+  <section id="cloud-view" hidden><main class="layout single"><div class="col-main" id="cloud-root"></div></main></section>
+  <section id="review-view" hidden><main class="layout single"><div class="col-main" id="review-root"></div></main></section>
+  <section id="admin-view" hidden><main class="layout single"><div class="col-main" id="admin-root"></div></main></section>
+
   <footer class="footer">
     <p>Doctyn Course Studio · Processing and files stay on your computer. This page only talks to the engine at <code id="footer-api"></code>.</p>
   </footer>
@@ -237,6 +245,27 @@
       <p class="muted small" id="player-meta"></p>
       <div class="downloads" id="player-downloads"></div>
     </div>
+  </dialog>
+
+  <dialog class="modal" id="editor">
+    <div class="modal-head">
+      <h2 id="editor-title">Course</h2>
+      <button type="button" class="icon-btn" id="editor-close" aria-label="Close editor">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7l-1.4-1.4L9.2 12 2.9 5.7l1.4-1.4 6.3 6.3 6.3-6.3z"/></svg>
+      </button>
+    </div>
+    <div class="tabs" id="editor-tabs" role="tablist"></div>
+    <div class="modal-body editor-body" id="editor-body"></div>
+  </dialog>
+
+  <dialog class="modal" id="review-dialog">
+    <div class="modal-head">
+      <h2 id="review-title">Review</h2>
+      <button type="button" class="icon-btn" id="review-close" aria-label="Close review">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7l-1.4-1.4L9.2 12 2.9 5.7l1.4-1.4 6.3 6.3 6.3-6.3z"/></svg>
+      </button>
+    </div>
+    <div class="modal-body editor-body" id="review-body"></div>
   </dialog>
 
   <dialog class="modal modal-small" id="settings">

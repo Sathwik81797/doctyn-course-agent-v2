@@ -11,13 +11,20 @@
     "publish-course": "tsx src/publish-course.ts",
     "dashboard": "tsx src/dashboard.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.studio.json",
-    "test": "node --import tsx --test \"test/*.test.ts\""
+    "test": "node --import tsx --test \"test/*.test.ts\"",
+    "cloud:dev": "tsx src/cloud-dev.ts",
+    "cloud:create-admin": "node cloud/admin-cli.js",
+    "worker": "tsx src/worker/index.ts",
+    "cloud:e2e": "tsx src/cloud-e2e.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1156.0",
+    "@aws-sdk/lib-storage": "^3.1156.0",
+    "@aws-sdk/s3-request-presigner": "^3.1156.0",
     "@huggingface/transformers": "3.8.1",
     "@vercel/blob": "^2.8.2",
     "axios": "^1.20.0",
@@ -28,12 +35,15 @@
     "mammoth": "^1.13.0",
     "mupdf": "^1.28.1",
     "openai": "^7.34.0",
+    "pg": "^8.23.1",
     "pptxgenjs": "^4.0.1",
     "sharp": "^0.35.5",
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.11",
     "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
     "esbuild": "^0.28.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"

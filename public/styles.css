@@ -266,3 +266,45 @@ input[type="text"]:focus, input[type="url"]:focus { outline: none; border-color:
 #studio-frame { display: block; width: 100%; height: calc(100vh - 100px); min-height: 560px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--white); box-shadow: var(--shadow); }
 body[data-view="studio"] .footer { display: none; }
 @media (max-width: 720px) { .main-nav { margin-left: 8px; } .brand-text { display: none; } }
+
+/* ---------- cloud workspace (accounts, courses, review, admin) ---------- */
+.account { display: flex; align-items: center; gap: 8px; }
+.account-name { color: var(--ink-2); max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layout.single { grid-template-columns: minmax(0, 1fr); }
+.auth-card { max-width: 460px; margin: 24px auto 0; }
+.auth-form { display: grid; gap: 14px; }
+.auth-form input, .field input, .field select, .field textarea, .slide-edit input, .slide-edit textarea, .editor-body textarea, .editor-body select { width: 100%; font: inherit; color: var(--ink); background: var(--white); border: 1px solid #c4d0e6; border-radius: 10px; padding: 9px 12px; }
+.slide-edit textarea, .editor-body textarea { resize: vertical; line-height: 1.5; }
+.auth-form input:focus, .field input:focus, .slide-edit input:focus, .slide-edit textarea:focus, .editor-body textarea:focus, .editor-body select:focus { outline: 2px solid var(--blue-600); outline-offset: 1px; border-color: var(--blue-600); }
+.link-btn { background: none; border: 0; color: var(--blue-700); font: 600 13px var(--font); cursor: pointer; padding: 4px; text-decoration: underline; }
+.row.wrap { flex-wrap: wrap; }
+.row.gap { gap: 8px; }
+.row.between { justify-content: space-between; }
+.row.right { justify-content: flex-end; }
+.course-list { display: grid; gap: 12px; }
+.course-row { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; }
+.course-row .video-title { font-size: 15px; font-weight: 650; }
+.job-mini { display: grid; gap: 6px; }
+.stack { display: grid; gap: 12px; }
+.tabs { display: flex; gap: 4px; padding: 0 14px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.tab { background: none; border: 0; border-bottom: 3px solid transparent; padding: 11px 12px; font: 600 14px var(--font); color: var(--ink-2); cursor: pointer; white-space: nowrap; }
+.tab[aria-selected="true"] { color: var(--blue-700); border-bottom-color: var(--blue-700); }
+.editor-body { padding: 18px; display: grid; gap: 14px; overflow-y: auto; max-height: calc(100vh - 190px); align-content: start; }
+.slide-edit { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; }
+.slide-edit.missing { border-color: #f2c2c7; background: var(--red-bg); }
+.anim-slide { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+.anim-slide summary { cursor: pointer; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.anim-slide[open] summary { margin-bottom: 10px; }
+.flags { margin: 0; padding-left: 18px; font-size: 13px; color: var(--amber); }
+.narration { white-space: pre-wrap; }
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
+.stat { display: grid; gap: 2px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--blue-50); }
+.stat strong { font-size: 22px; color: var(--blue-900); }
+.table-wrap { overflow-x: auto; }
+.table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.table th { text-align: left; font-weight: 650; color: var(--ink-2); padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.table td { padding: 8px 10px; border-bottom: 1px solid #edf1f8; vertical-align: middle; }
+.table select { font: inherit; padding: 4px 8px; border-radius: 8px; border: 1px solid #c4d0e6; background: var(--white); }
+.err-cell { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--red); }
+.badge-queued, .badge-running { background: var(--blue-100); color: var(--blue-700); }
+@media (max-width: 720px) { .editor-body { max-height: calc(100vh - 160px); padding: 12px; } .account-name { display: none; } }

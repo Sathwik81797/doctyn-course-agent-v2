@@ -1,0 +1,29 @@
+# Persistent render worker: Node + LibreOffice + FFmpeg + the existing build-course pipeline.
+# Build:  docker build -f Dockerfile.worker -t doctyn-worker .
+# Run:    docker run --env-file .env.worker -v doctyn-work:/data doctyn-worker
+FROM node:22-bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ffmpeg libreoffice-impress libreoffice-writer fonts-liberation fonts-dejavu-core fonts-noto-core \
+      ca-certificates python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY tsconfig.json ./
+COPY src ./src
+COPY cloud ./cloud
+
+ENV NODE_ENV=production \
+    WORK_DIR=/data/work \
+    OUTPUT_DIR=/data/output \
+    TEMP_DIR=/data/temp \
+    INPUT_DIR=/data/input \
+    LIBREOFFICE_PATH=/usr/bin/soffice \
+    KOKORO_MODEL_DIR=/data/models \
+    TTS_PROVIDER=kokoro
+VOLUME /data
+
+# Kokoro downloads its model on first use into /data/models (kept on the volume).
+CMD ["npx", "tsx", "src/worker/index.ts"]
