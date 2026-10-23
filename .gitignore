@@ -1,0 +1,13 @@
+node_modules/
+.env
+temp/
+output/
+*.mp3
+*.wav
+*.mp4
+~$*
+models/
+
+.vercel
+input/.replaced/
+.env*

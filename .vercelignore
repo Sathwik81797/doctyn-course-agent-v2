@@ -1,0 +1,10 @@
+# Only the static dashboard in public/ is deployed. Course files, models and outputs stay local.
+input/
+output/
+models/
+temp/
+node_modules/
+.env
+*.mp3
+*.mp4
+*.wav

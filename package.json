@@ -1,0 +1,44 @@
+{
+  "name": "doctyn-course-agent",
+  "version": "1.0.0",
+  "description": "Local-only medical course video pipeline: PPTX + DOCX voiceover -> narrated MP4 with captions",
+  "scripts": {
+    "test-services": "tsx src/test-services.ts",
+    "validate": "tsx src/validate.ts",
+    "preview-tts": "tsx src/preview-tts.ts",
+    "build-course": "tsx src/build-course.ts",
+    "animate": "tsx src/animate.ts",
+    "publish-course": "tsx src/publish-course.ts",
+    "dashboard": "tsx src/dashboard.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.studio.json",
+    "test": "node --import tsx --test \"test/*.test.ts\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@huggingface/transformers": "3.8.1",
+    "@vercel/blob": "^2.8.2",
+    "axios": "^1.20.0",
+    "docx": "^9.11.0",
+    "dotenv": "^18.0.8",
+    "jszip": "^3.10.2",
+    "kokoro-js": "1.2.1",
+    "mammoth": "^1.13.0",
+    "mupdf": "^1.28.1",
+    "openai": "^7.34.0",
+    "pptxgenjs": "^4.0.1",
+    "sharp": "^0.35.5",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

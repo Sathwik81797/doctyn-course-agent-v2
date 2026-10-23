@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "lib": ["es2023", "dom", "dom.iterable"], "types": [] },
+  "include": ["src/animation/studio/**/*.ts", "src/animation/scene/**/*.ts", "src/animation/types.ts"]
+}

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doctyn Animation Studio</title>
+<link rel="stylesheet" href="studio.css">
+</head>
+<body>
+<header>
+  <strong>Doctyn Animation Studio</strong>
+  <select id="course" aria-label="Course"></select>
+  <span id="summary" class="muted"></span>
+  <span id="toast" role="status"></span>
+</header>
+<main>
+  <nav id="slides" aria-label="Slides"></nav>
+  <section id="center">
+    <div id="stage" aria-label="Animation preview"></div>
+    <div id="controls">
+      <button id="play" type="button">▶ Play</button>
+      <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="Position">
+      <span id="clock">0.0 / 0.0 s</span>
+      <label class="muted"><input id="useAudio" type="checkbox" checked> narration audio</label>
+      <audio id="audio" preload="auto"></audio>
+    </div>
+    <div id="timeline" aria-label="Animation timeline"></div>
+    <div id="timeline-actions">
+      <button id="save-timeline" type="button">Save timeline</button>
+      <button id="reanalyze" type="button" class="secondary">Re-run topic analysis</button>
+      <span class="muted" id="timeline-help">Drag a bar to move it, drag its edges to resize it. Click the ruler to seek.</span>
+    </div>
+  </section>
+  <aside id="panel">
+    <div id="tabs" role="tablist"></div>
+    <div id="tabbody"></div>
+  </aside>
+</main>
+<script type="module" src="studio.js"></script>
+</body>
+</html>
