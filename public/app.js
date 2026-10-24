@@ -1,620 +1,764 @@
-import { cloudView, setupCloud, show as showCloud } from "./cloud.js";
+// Doctyn Course Studio — the single dashboard.
+// Upload, validate, edit slides / narration / animations, generate, review and watch — all on this page.
+// Everything shown comes from the /api/v3 backend; when it (or the rendering engine) is not available the page says so.
+import { $, el, formatBytes, formatClock, formatDuration, fullDate, svgPlay, timeAgo, toast } from "./ui.js";
 
-// Doctyn Course Studio — dashboard UI.
-// Everything shown here comes from the local engine (npm run dashboard). Nothing is simulated:
-// when the engine is not reachable the page says so and disables the actions.
+const API = "/api/v3";
+const STORE_KEY = "doctyn.course";
 
-const DEFAULT_API = "http://127.0.0.1:8788";
-const STORAGE_KEY = "doctyn.engineUrl";
-const JOB_LABELS = { validate: "Validation", "preview-tts": "Voice preview", "build-course": "Course build" };
-const JOB_ICONS = { validate: "✓", "preview-tts": "♪", "build-course": "▶", upload: "↑" };
-const STATUS_LABELS = { running: "Running", succeeded: "Succeeded", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted" };
-
-const $ = (id) => document.getElementById(id);
+const STATUS_LABEL = {
+  created: "Needs files", uploaded: "Uploaded", parsing: "Validating…", parsed: "Validated", invalid: "Needs attention",
+  queued: "Queued", rendering: "Generating…", complete: "Complete", failed: "Failed",
+};
+const STATUS_CLASS = { complete: "badge-complete", failed: "badge-failed", invalid: "badge-cancelled", created: "badge-cancelled", parsed: "badge-complete" };
+const REVIEW_LABEL = { none: "Not reviewed", pending: "Awaiting medical review", approved: "Medically approved", rejected: "Changes requested" };
+const JOB_LABEL = { parse: "Validation", plan: "Animation plan", preview: "Voice preview", build: "Video generation", animate: "Animation render" };
+const JOB_ICON = { parse: "✓", plan: "◇", preview: "♪", build: "▶", animate: "▶" };
+const JOB_STATUS_LABEL = { queued: "Queued", running: "Running", succeeded: "Succeeded", failed: "Failed", cancelled: "Cancelled" };
+const ACTIVE_STATUS = ["parsing", "queued", "rendering"];
 
 const state = {
-  api: DEFAULT_API,
-  online: false,
-  health: null,
-  job: null,
-  logLine: 0,
-  pollTimer: 0,
-  healthTimer: 0,
+  user: null,
+  meta: null,
+  unavailable: null,
+  engine: null,
+  courses: [],
+  currentId: null,
+  course: null,
+  jobs: [],
+  activity: [],
+  log: "",
+  logJob: null,
   selected: { pptx: null, docx: null },
   uploading: false,
-  courses: [],
-  published: null,
+  editor: { open: false, slide: 1, drafts: {}, anim: {} },
+  mode: "login",
+  timer: 0,
+  tickBusy: false,
+  adminFilter: "",
 };
 
-// ---------- small helpers ----------
+// ---------- backend calls ----------
 
-function storageGet(key) {
-  try { return localStorage.getItem(key); } catch { return null; }
-}
-function storageSet(key, value) {
-  try { value === null ? localStorage.removeItem(key) : localStorage.setItem(key, value); } catch { /* storage unavailable */ }
-}
-
-function el(tag, attrs = {}, ...children) {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v === undefined || v === null || v === false) continue;
-    if (k === "class") node.className = v;
-    else if (k === "text") node.textContent = v;
-    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
-    else node.setAttribute(k, v === true ? "" : v);
-  }
-  for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) node.append(c);
-  return node;
-}
-
-function formatDuration(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 0) return "—";
-  const s = Math.round(seconds);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const r = s % 60;
-  if (h) return `${h}h ${m}m`;
-  if (m) return `${m}m ${String(r).padStart(2, "0")}s`;
-  return `${r}s`;
-}
-function formatClock(seconds) {
-  const s = Math.round(seconds);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const r = String(s % 60).padStart(2, "0");
-  return h ? `${h}:${String(m).padStart(2, "0")}:${r}` : `${m}:${r}`;
-}
-function formatBytes(n) {
-  if (!Number.isFinite(n)) return "";
-  if (n < 1024) return `${n} B`;
-  if (n < 1048576) return `${(n / 1024).toFixed(0)} KB`;
-  if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`;
-  return `${(n / 1073741824).toFixed(2)} GB`;
-}
-function timeAgo(iso) {
-  if (!iso) return "";
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 45) return "just now";
-  if (diff < 3600) return `${Math.round(diff / 60)} min ago`;
-  if (diff < 86400) return `${Math.round(diff / 3600)} h ago`;
-  if (diff < 86400 * 7) return `${Math.round(diff / 86400)} d ago`;
-  return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
-}
-function fullDate(iso) {
-  return iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
-}
-
-let toastTimer = 0;
-function toast(message, isError = false) {
-  const t = $("toast");
-  t.textContent = message;
-  t.classList.toggle("error", isError);
-  t.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), isError ? 7000 : 3500);
-}
-
-function mediaUrl(slug, rel, { download = false, version = "" } = {}) {
-  const path = rel.split("/").map(encodeURIComponent).join("/");
-  const q = new URLSearchParams();
-  if (download) q.set("download", "1");
-  if (version) q.set("v", version);
-  const qs = q.toString();
-  return `${state.api}/media/${encodeURIComponent(slug)}/${path}${qs ? `?${qs}` : ""}`;
-}
-
-async function api(path, options = {}) {
+async function call(method, path, body) {
   let res;
   try {
-    res = await fetch(`${state.api}${path}`, { ...options, headers: { ...(options.body ? { "Content-Type": "application/json" } : {}), ...options.headers } });
+    res = await fetch(API + path, {
+      method,
+      credentials: "same-origin",
+      headers: { "X-Requested-With": "doctyn", ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
   } catch {
-    setOnline(false);
-    throw new Error("The local course engine is not reachable. Is `npm run dashboard` running?");
+    const e = new Error("The Doctyn backend could not be reached. Check your internet connection.");
+    e.status = 0;
+    throw e;
   }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Engine returned HTTP ${res.status}.`);
-  return data;
+  const text = await res.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch { /* not JSON */ }
+  if (!res.ok) {
+    const e = new Error(data?.error || `Request failed (HTTP ${res.status}).`);
+    e.status = res.status;
+    e.problems = data?.problems;
+    throw e;
+  }
+  return data ?? {};
 }
+const errText = (e) => e?.message || String(e);
+const fail = (e) => toast(errText(e), true);
 
-// ---------- connection ----------
+const storageGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const storageSet = (k, v) => { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* storage unavailable */ } };
 
-async function probe(base) {
+const courseBusy = (c) => Boolean(c) && ACTIVE_STATUS.includes(c.status);
+const jobActive = (j) => Boolean(j) && ["queued", "running"].includes(j.status);
+const dirty = () => Object.keys(state.editor.drafts).length > 0 || Object.keys(state.editor.anim).length > 0;
+const fileUrl = (c, name, download = false) => `${API}/courses/${c.id}/files/${name}${download ? "?download=1" : ""}`;
+
+// ---------- session and boot ----------
+
+async function loadSession() {
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 3000);
-    const res = await fetch(`${base}/api/health`, { signal: ctrl.signal });
-    clearTimeout(timer);
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data && data.service === "doctyn-course-agent" ? data : null;
-  } catch {
-    return null;
+    const [{ user }, meta] = await Promise.all([call("GET", "/auth/me"), call("GET", "/meta")]);
+    state.user = user;
+    state.meta = meta;
+    state.unavailable = null;
+  } catch (e) {
+    state.user = null;
+    state.unavailable = e.status === 404 || e.status === 0
+      ? ["The Doctyn backend is not available at this address.", "Run the dashboard with npm run cloud:dev, or open the deployed site once its backend is configured."]
+      : [errText(e), ...(e.problems ?? [])];
   }
 }
 
-function candidateApis() {
-  const list = [];
-  const saved = storageGet(STORAGE_KEY);
-  const local = ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname) && location.protocol === "http:";
-  // Served by the engine itself: it is always the right backend, whatever port it runs on.
-  if (local) list.push(location.origin);
-  if (saved) list.push(saved);
-  list.push(DEFAULT_API);
-  return [...new Set(list.map((u) => u.replace(/\/+$/, "")))];
-}
-
-async function connect() {
-  for (const base of candidateApis()) {
-    const health = await probe(base);
-    if (health) {
-      state.api = base;
-      syncStudioFrame();
-      onHealth(health);
-      return;
-    }
+function renderAccount() {
+  const box = $("account");
+  box.replaceChildren();
+  if (!state.user) return;
+  if (state.meta?.localMode) {
+    box.append(el("span", { class: "account-name small", title: "No sign-in on this computer", text: "Local mode" }));
+    return;
   }
-  state.api = candidateApis()[0];
-  setOnline(false);
+  box.append(
+    el("span", { class: "account-name small", title: state.user.email, text: `${state.user.name} · ${state.user.role}` }),
+    el("button", { class: "btn btn-ghost small", type: "button", onclick: signOut }, "Sign out"),
+  );
 }
 
-async function checkHealth() {
-  const health = await probe(state.api);
-  if (health) onHealth(health);
-  else if (state.online) setOnline(false);
-  else if (!storageGet(STORAGE_KEY)) await connect();
-  else setOnline(false);
+async function signOut() {
+  try { await call("POST", "/auth/logout", {}); } catch { /* already signed out */ }
+  location.reload();
 }
 
-function scheduleHealth() {
-  clearTimeout(state.healthTimer);
-  state.healthTimer = setTimeout(async () => {
-    await checkHealth();
-    scheduleHealth();
-  }, state.online ? 10000 : 4000);
+function showBanner(title, text, cmd) {
+  $("banner-title").textContent = title;
+  $("banner-text").textContent = text ?? "";
+  const pre = $("banner-cmd");
+  pre.hidden = !cmd;
+  if (cmd) pre.querySelector("code").textContent = cmd;
+  $("offline-banner").hidden = false;
 }
 
-function onHealth(health) {
-  const wasOnline = state.online;
-  state.health = health;
-  setOnline(true);
-  updateVoiceCopy();
-  if (health.currentJob && (!state.job || state.job.id !== health.currentJob.id)) attachJob(health.currentJob);
-  if (!wasOnline) refreshAll();
-}
-
-function setOnline(online) {
-  state.online = online;
-  $("offline-banner").hidden = online;
-  $("banner-api").textContent = state.api;
-  $("footer-api").textContent = state.api;
-  updateStatusPill();
-  updateControls();
-  if (!online) {
-    $("current-inputs").replaceChildren(el("span", { class: "muted", text: "Current input files appear here once the engine is connected." }));
-    renderLibrary(null);
-    renderPreviews(null);
-    renderActivity(null);
+async function boot() {
+  setupStatic();
+  await loadSession();
+  renderAccount();
+  if (state.unavailable) {
+    showBanner("The Doctyn backend is not reachable.", state.unavailable.join("\n"));
+    $("app-main").hidden = false;
+    setPill("offline", "Backend unavailable");
+    renderAll();
+    return;
   }
+  if (!state.user) {
+    $("auth-gate").hidden = false;
+    $("auth-gate").replaceChildren(authCard());
+    setPill("checking", "Sign in to continue");
+    return;
+  }
+  $("auth-gate").hidden = true;
+  $("app-main").hidden = false;
+  await refreshAll();
+  scheduleTick();
 }
 
-function updateStatusPill() {
-  const pill = $("status-pill");
-  const running = state.job && state.job.status === "running";
-  pill.dataset.state = !state.online ? "offline" : running ? "busy" : "online";
-  $("status-text").textContent = !state.online
-    ? "Engine offline"
-    : running
-      ? `${JOB_LABELS[state.job.kind]} running · ${Math.round(state.job.progress.percent)}%`
-      : "Engine connected";
+// ---------- sign in / register ----------
+
+function authCard() {
+  const login = state.mode === "login";
+  const msg = el("div", { class: "notice", hidden: true });
+  const email = el("input", { type: "email", required: true, autocomplete: "email", placeholder: "you@hospital.org" });
+  const name = el("input", { type: "text", required: true, autocomplete: "name", maxlength: "100" });
+  const pw = el("input", { type: "password", required: true, minlength: login ? "1" : "10", autocomplete: login ? "current-password" : "new-password" });
+  const submit = el("button", { class: "btn btn-primary", type: "submit" }, login ? "Sign in" : "Create account");
+  const form = el("form", {
+    class: "auth-form",
+    onsubmit: async (ev) => {
+      ev.preventDefault();
+      submit.disabled = true;
+      msg.hidden = true;
+      try {
+        if (login) {
+          await call("POST", "/auth/login", { email: email.value, password: pw.value });
+          location.reload();
+        } else {
+          const r = await call("POST", "/auth/register", { email: email.value, name: name.value, password: pw.value });
+          state.mode = "login";
+          $("auth-gate").replaceChildren(authCard());
+          toast(r.message);
+        }
+      } catch (e) {
+        msg.textContent = errText(e);
+        msg.className = "notice error";
+        msg.hidden = false;
+        submit.disabled = false;
+      }
+    },
+  },
+    login ? null : el("label", { class: "field" }, "Your name", name),
+    el("label", { class: "field" }, "Email", email),
+    el("label", { class: "field" }, login ? "Password" : "Password (at least 10 characters)", pw),
+    msg,
+    el("div", { class: "row between wrap gap" },
+      submit,
+      el("button", { class: "link-btn", type: "button", onclick: () => { state.mode = login ? "register" : "login"; $("auth-gate").replaceChildren(authCard()); } }, login ? "Create an account" : "I already have an account"),
+    ),
+  );
+  return el("section", { class: "card auth-card" },
+    el("div", { class: "card-head" }, el("div", {},
+      el("h2", { text: login ? "Sign in" : "Create your account" }),
+      el("p", { class: "muted", text: "Your presentations, scripts and videos are private to your account." }),
+    )),
+    form,
+    state.meta?.registration === "approval" && !login ? el("p", { class: "muted small", text: "New accounts are approved by an administrator before they can sign in." }) : null,
+  );
 }
 
-function updateVoiceCopy() {
-  const tts = state.health && state.health.tts;
-  if (!tts) return;
-  const name = tts.provider === "kokoro" ? "Kokoro" : tts.provider === "openai" ? "OpenAI" : "Windows";
-  $("preview-title").textContent = `Preview ${name} voice`;
-  const voice = tts.voice ? ` (${tts.voice}${tts.provider !== "windows" ? `, ${Number(tts.speed).toFixed(1)}×` : ""})` : "";
-  $("preview-desc").textContent =
-    `Records sample narration${voice} for a few slides so you can judge the voice before a full build. Build files are not touched.` +
-    (tts.provider === "openai" ? " Uses the paid OpenAI API." : "");
+// ---------- loading data ----------
+
+async function loadCourses() {
+  const { courses } = await call("GET", "/courses");
+  state.courses = courses;
+  const stored = storageGet(STORE_KEY);
+  if (state.currentId === null && stored !== "new") {
+    const pick = courses.find((c) => c.id === stored) ?? courses[0];
+    state.currentId = pick?.id ?? null;
+  }
+  if (state.currentId && !courses.some((c) => c.id === state.currentId)) state.currentId = courses[0]?.id ?? null;
+  await loadCurrent();
 }
 
-function updateControls() {
-  const running = Boolean(state.job && state.job.status === "running");
-  const ready = state.online && !running && !state.uploading;
-  document.querySelectorAll("[data-job]").forEach((b) => (b.disabled = !ready));
-  $("preview-slides").disabled = !ready;
-  const anySelected = state.selected.pptx || state.selected.docx;
-  $("upload-btn").disabled = !ready || !anySelected;
-  document.querySelectorAll(".dropzone").forEach((dz) => {
-    dz.classList.toggle("disabled", !ready);
-    dz.querySelector("input").disabled = !ready;
-  });
-  $("cancel-btn").hidden = !running;
+async function loadCurrent() {
+  if (!state.currentId) { state.course = null; state.jobs = []; return; }
+  const { course, jobs } = await call("GET", `/courses/${state.currentId}`);
+  state.course = course;
+  state.jobs = jobs;
 }
 
-// ---------- data refresh ----------
+async function loadEngine() {
+  try { state.engine = await call("GET", "/engine"); } catch { state.engine = null; }
+}
+
+async function loadActivity() {
+  try { state.activity = (await call("GET", "/activity")).activity; } catch { state.activity = []; }
+}
+
+async function loadLog() {
+  const job = state.course?.job;
+  if (!job || !$("log-details").open && !jobActive(job)) return;
+  try {
+    const { job: full } = await call("GET", `/jobs/${job.id}`);
+    state.log = full.log ?? "";
+    state.logJob = job.id;
+  } catch { /* job gone */ }
+}
 
 async function refreshAll() {
-  if (!state.online) return;
-  await Promise.allSettled([refreshInputs(), refreshLibrary(), refreshPreviews(), refreshActivity()]);
+  try {
+    await loadCourses();
+  } catch (e) {
+    if (e.status === 401) { location.reload(); return; }
+    fail(e);
+  }
+  await Promise.all([loadEngine(), loadActivity()]);
+  await loadLog();
+  renderAll();
 }
 
-async function refreshInputs() {
-  const data = await api("/api/inputs");
-  const box = $("current-inputs");
-  const chips = [];
-  for (const type of ["pptx", "docx"]) {
-    const files = data[type] || [];
-    if (files.length === 0) {
-      chips.push(el("span", { class: "chip" }, el("span", { class: "chip-label", text: type.toUpperCase() }), el("span", { class: "muted", text: "none in input/" })));
-    } else {
-      for (const f of files) {
-        chips.push(el("span", { class: "chip", title: `${f.name} · ${formatBytes(f.bytes)} · ${fullDate(f.modifiedAt)}` },
-          el("span", { class: "chip-label", text: type.toUpperCase() }), el("span", { text: f.name })));
-      }
-      if (files.length > 1) chips.push(el("span", { class: "chip", style: "color: var(--red)", text: `${files.length} ${type} files — the engine needs exactly one` }));
+// ---------- polling ----------
+
+function scheduleTick() {
+  clearTimeout(state.timer);
+  const fast = courseBusy(state.course) || state.courses.some((c) => courseBusy(c));
+  state.timer = setTimeout(tick, fast ? 2500 : 10000);
+}
+
+async function tick() {
+  if (!document.hidden && !state.tickBusy && !state.uploading) {
+    state.tickBusy = true;
+    try {
+      const before = state.course?.updatedAt;
+      await loadCourses();
+      await Promise.all([loadEngine(), loadActivity()]);
+      await loadLog();
+      renderAll({ editorRefresh: before !== state.course?.updatedAt });
+    } catch (e) {
+      if (e.status === 401) { location.reload(); return; }
+    } finally {
+      state.tickBusy = false;
     }
   }
-  box.replaceChildren(...chips);
+  scheduleTick();
 }
 
-async function refreshLibrary() {
-  const data = await api("/api/courses");
-  state.courses = data.courses;
-  renderLibrary(data.courses);
+// ---------- rendering everything ----------
+
+function renderAll(opts = {}) {
+  renderPill();
+  renderCoursePicker();
+  renderFiles();
+  renderProduce();
+  renderProgress();
+  renderPreviews();
+  renderActivity();
+  renderVideos();
+  renderRoleAreas();
+  if (state.editor.open && (opts.editorRefresh || opts.force) && !dirty() && !editorHasFocus()) renderEditor();
+  else if (state.editor.open) renderEditorChrome();
 }
 
-async function refreshPublished() {
-  const box = $("published");
-  const message = (text) => box.replaceChildren(el("div", { class: "empty" }, el("p", { text })));
-  try {
-    const res = await fetch("/api/library", { headers: { Accept: "application/json" } });
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data) throw new Error("unavailable");
-    state.published = data.courses;
-    if (!data.configured) message("The video library is not connected to storage yet. Connect a Vercel Blob store, then publish a course.");
-    else if (!data.courses.length) message("No courses have been published yet.");
-    else box.replaceChildren(...data.courses.map((c) => videoCard(publishedItem(c), false)));
-  } catch {
-    message("The published video library could not be loaded. It is served by the deployed website, not by the local engine.");
+function setPill(stateName, text) {
+  $("status-pill").dataset.state = stateName;
+  $("status-text").textContent = text;
+}
+
+function renderPill() {
+  const e = state.engine;
+  if (!e) return setPill("offline", "Engine status unknown");
+  if (e.online) {
+    setPill(e.busy ? "busy" : "online", `Engine online${e.tts ? ` · voice ${e.tts}` : ""}${e.busy ? " · rendering" : ""}`);
+    $("offline-banner").hidden = true;
+  } else {
+    setPill("offline", "Engine offline");
+    if (state.meta?.localMode) {
+      showBanner("The rendering engine is not running.", "Jobs wait in the queue. In local mode the engine starts together with the dashboard; check the terminal where you ran npm run cloud:dev for errors, then retry.");
+    } else {
+      showBanner("The Windows rendering engine is offline.", "You can still upload and edit. Jobs wait in the queue and start automatically when the engine is running on the Windows PC. To start it, run in Git Bash:", "bash scripts/start-engine.sh");
+    }
   }
 }
 
-async function refreshPreviews() {
-  const data = await api("/api/previews");
-  renderPreviews(data.previews);
+function renderCoursePicker() {
+  const sel = $("course-select");
+  const want = state.currentId ?? "__new__";
+  sel.replaceChildren(
+    ...state.courses.map((c) => el("option", { value: c.id, text: `${c.title} · ${STATUS_LABEL[c.status] ?? c.status}` })),
+    el("option", { value: "__new__", text: "＋ New course" }),
+  );
+  sel.value = want;
 }
 
-async function refreshActivity() {
-  const data = await api("/api/activity");
-  renderActivity(data.activity);
-}
+// ---------- 1. course files ----------
 
-// ---------- uploads ----------
+function renderFiles() {
+  const c = state.course;
+  const isNew = !c;
+  const busy = courseBusy(c);
+  const titleInput = $("course-title");
+  if (document.activeElement !== titleInput) titleInput.value = isNew ? titleInput.value : c.title;
+  titleInput.disabled = busy;
+  $("files-title").lastChild.textContent = isNew ? "New course files" : "Course files";
 
-function selectFile(type, file) {
-  const dz = $(`drop-${type}`);
-  const label = dz.querySelector('[data-role="selected"]');
-  if (file && !file.name.toLowerCase().endsWith(`.${type}`)) {
-    toast(`"${file.name}" is not a .${type} file.`, true);
-    file = null;
+  const chips = [];
+  if (c) {
+    for (const [type, name] of [["PPTX", c.files.pptx], ["DOCX", c.files.docx]]) {
+      chips.push(el("span", { class: "chip", title: name ?? "" }, el("span", { class: "chip-label", text: type }), name ? el("span", { text: name }) : el("span", { class: "muted", text: "none" })));
+    }
+    chips.push(el("span", { class: `badge ${STATUS_CLASS[c.status] ?? ""}`, text: STATUS_LABEL[c.status] ?? c.status }));
+    if (c.slideCount) chips.push(el("span", { class: "chip" }, el("span", { class: "chip-label", text: "SLIDES" }), el("span", { text: String(c.slideCount) })));
+  } else {
+    chips.push(el("span", { class: "muted", text: "Add a presentation and a script to begin." }));
   }
-  state.selected[type] = file || null;
-  dz.classList.toggle("has-file", Boolean(file));
-  label.textContent = file ? `${file.name} · ${formatBytes(file.size)}` : "";
-  updateControls();
+  $("current-inputs").replaceChildren(...chips);
+
+  const edit = $("edit-btn");
+  edit.hidden = !(c && c.slides?.length);
+  edit.textContent = state.editor.open ? "Hide editor" : "Edit Course";
+
+  const up = $("upload-btn");
+  const { pptx, docx } = state.selected;
+  up.textContent = isNew ? "Upload files" : "Replace files";
+  up.disabled = state.uploading || busy || (isNew ? !(pptx && docx) : !(pptx || docx));
+
+  // validation box
+  const box = $("validation-box");
+  box.className = "notice";
+  box.hidden = true;
+  if (c) {
+    const v = c.validation;
+    if (c.status === "parsing") {
+      box.hidden = false;
+      box.textContent = state.engine && !state.engine.online
+        ? "Files uploaded. Validation will start when the rendering engine is online."
+        : "Reading your presentation and script…";
+    } else if (c.status === "invalid") {
+      box.hidden = false;
+      box.className = "notice error";
+      box.textContent = [
+        c.error,
+        v?.missing?.length ? `Missing narration: slide ${v.missing.join(", ")}.` : "",
+        v?.duplicates?.length ? `Duplicate sections: ${v.duplicates.map((d) => d.number).join(", ")}.` : "",
+        v?.malformed?.length ? `Unreadable headings: ${v.malformed.map((m) => `"${m.text}"`).join(", ")}.` : "",
+        "Open Edit Course to type the missing narration, or upload a corrected script.",
+      ].filter(Boolean).join("\n");
+    } else if (c.slides?.length) {
+      box.hidden = false;
+      box.className = "notice success";
+      box.textContent = `Validated: ${c.slideCount} slides and ${c.slideCount} narration sections match.${v?.warnings?.length ? `\n${v.warnings.join("\n")}` : ""}`;
+    }
+  }
+}
+
+function setSelected(type, file) {
+  state.selected[type] = file;
+  const zone = $(`drop-${type}`);
+  zone.classList.toggle("has-file", Boolean(file));
+  zone.querySelector("[data-role=selected]").textContent = file ? `${file.name} · ${formatBytes(file.size)}` : "";
+  if (type === "pptx" && file && !state.currentId && !$("course-title").value.trim()) {
+    $("course-title").value = file.name.replace(/\.pptx$/i, "").replace(/[_-]+/g, " ").replace(/\s*\(\d+\)\s*$/, "").trim();
+  }
+  renderFiles();
 }
 
 function setupDropzones() {
-  document.querySelectorAll(".dropzone").forEach((dz) => {
-    const type = dz.dataset.type;
-    const input = dz.querySelector("input");
-    input.addEventListener("change", () => selectFile(type, input.files[0]));
-    dz.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      if (!input.disabled) dz.classList.add("drag");
-    });
-    dz.addEventListener("dragleave", () => dz.classList.remove("drag"));
-    dz.addEventListener("drop", (e) => {
-      e.preventDefault();
-      dz.classList.remove("drag");
-      if (input.disabled) return;
-      const files = [...e.dataTransfer.files];
-      // Accept both files dropped onto either zone.
-      for (const f of files) {
-        const ext = f.name.toLowerCase().split(".").pop();
-        if (ext === "pptx" || ext === "docx") selectFile(ext, f);
-        else toast(`"${f.name}" is not a .pptx or .docx file.`, true);
-      }
-    });
-  });
+  for (const type of ["pptx", "docx"]) {
+    const zone = $(`drop-${type}`);
+    const input = zone.querySelector("input");
+    const ext = `.${type}`;
+    const pick = (f) => {
+      if (f && !f.name.toLowerCase().endsWith(ext)) { toast(`"${f.name}" is not a ${ext} file.`, true); return; }
+      setSelected(type, f ?? null);
+    };
+    input.addEventListener("change", () => pick(input.files[0] ?? null));
+    for (const t of ["dragenter", "dragover"]) zone.addEventListener(t, (e) => { e.preventDefault(); zone.classList.add("drag"); });
+    for (const t of ["dragleave", "drop"]) zone.addEventListener(t, (e) => { e.preventDefault(); zone.classList.remove("drag"); });
+    zone.addEventListener("drop", (e) => pick(e.dataTransfer.files[0] ?? null));
+  }
 }
 
-function uploadOne(type, file, onProgress) {
+function putFile(url, headers, file, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("PUT", `${state.api}/api/inputs/${type}?filename=${encodeURIComponent(file.name)}`);
-    xhr.setRequestHeader("Content-Type", "application/octet-stream");
-    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded, e.total);
-    xhr.onload = () => {
-      let data = {};
-      try { data = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
-      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-      else reject(new Error(data.error || `Upload failed (HTTP ${xhr.status}).`));
-    };
-    xhr.onerror = () => reject(new Error("Upload failed: the local engine is not reachable."));
+    xhr.open("PUT", url);
+    for (const [k, v] of Object.entries(headers ?? {})) xhr.setRequestHeader(k, v);
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`The upload was rejected by storage (HTTP ${xhr.status}). If this keeps happening, the storage bucket CORS settings may be missing.`)));
+    xhr.onerror = () => reject(new Error("The upload could not reach storage. Check your connection and the bucket CORS settings."));
     xhr.send(file);
   });
 }
 
 async function uploadSelected() {
-  const items = ["pptx", "docx"].filter((t) => state.selected[t]).map((t) => [t, state.selected[t]]);
-  if (!items.length) return;
   const notice = $("upload-notice");
   notice.hidden = true;
-  state.uploading = true;
-  updateControls();
-  $("upload-progress").hidden = false;
-  const total = items.reduce((a, [, f]) => a + f.size, 0) || 1;
-  let base = 0;
-  const messages = [];
-  try {
-    for (const [type, file] of items) {
-      $("upload-text").textContent = `Uploading ${file.name}…`;
-      const result = await uploadOne(type, file, (loaded) => {
-        $("upload-bar").style.width = `${((base + loaded) / total) * 100}%`;
-      });
-      base += file.size;
-      messages.push(`Uploaded ${result.file.name}${result.replaced.length ? ` (previous file moved to input/.replaced/)` : ""}.`);
-      selectFile(type, null);
-      $(`drop-${type}`).querySelector("input").value = "";
-    }
-    $("upload-bar").style.width = "100%";
-    notice.className = "notice success";
-    notice.textContent = `${messages.join("\n")}\nNext: run Validate course to check every slide has narration.`;
-  } catch (err) {
+  if (state.unavailable) {
+    notice.textContent = `Cannot upload: ${state.unavailable[0]}`;
     notice.className = "notice error";
-    notice.textContent = [...messages, err.message].join("\n");
-  } finally {
     notice.hidden = false;
-    state.uploading = false;
-    setTimeout(() => ($("upload-progress").hidden = true), 800);
-    updateControls();
-    refreshInputs().catch(() => {});
-    refreshActivity().catch(() => {});
+    return;
   }
-}
-
-// ---------- jobs ----------
-
-async function startJob(kind) {
-  const body = { kind };
-  if (kind === "preview-tts") body.slides = $("preview-slides").value.trim();
-  const paid = state.health && state.health.tts && state.health.tts.provider === "openai";
-  if (paid && kind !== "validate" && !confirm("TTS_PROVIDER is openai, so this makes paid OpenAI API requests. Continue?")) return;
+  const types = ["pptx", "docx"].filter((t) => state.selected[t]);
+  if (!types.length) return;
+  state.uploading = true;
+  renderFiles();
+  const progress = $("upload-progress");
+  progress.hidden = false;
+  const report = (pct, text) => { $("upload-bar").style.width = `${pct}%`; $("upload-text").textContent = text; };
   try {
-    const { job } = await api("/api/jobs", { method: "POST", body: JSON.stringify(body) });
-    attachJob(job);
-    toast(`${JOB_LABELS[kind]} started.`);
-  } catch (err) {
-    toast(err.message, true);
-  }
-}
-
-function attachJob(job) {
-  state.job = job;
-  state.logLine = 0;
-  $("log").textContent = "";
-  $("log-details").open = job.kind === "validate";
-  renderJob(job);
-  updateControls();
-  pollJob();
-  document.querySelectorAll(".video-card").length && renderLibrary(state.courses);
-}
-
-async function pollJob() {
-  clearTimeout(state.pollTimer);
-  if (!state.job) return;
-  try {
-    const data = await api(`/api/jobs/${encodeURIComponent(state.job.id)}?after=${state.logLine}`);
-    state.job = data.job;
-    if (data.lines.length) appendLog(data.lines);
-    state.logLine = data.nextLine;
-    renderJob(data.job);
-    if (data.job.status !== "running") {
-      updateControls();
-      onJobFinished(data.job);
-      return;
+    let id = state.currentId;
+    if (!id) {
+      const title = $("course-title").value.trim() || state.selected.pptx.name.replace(/\.pptx$/i, "");
+      id = (await call("POST", "/courses", { title })).course.id;
     }
-  } catch {
-    // engine went away; health check will report it, keep trying
+    for (const [i, type] of types.entries()) {
+      const file = state.selected[type];
+      const up = await call("POST", `/courses/${id}/upload-url`, { type, filename: file.name, size: file.size });
+      await putFile(up.url, up.headers, file, (f) => report(Math.round(((i + f) / types.length) * 100), `Uploading ${file.name}… ${Math.round(f * 100)}%`));
+      await call("POST", `/courses/${id}/files/complete`, { type, key: up.key, filename: file.name });
+    }
+    report(100, "Upload complete.");
+    state.currentId = id;
+    storageSet(STORE_KEY, id);
+    state.selected = { pptx: null, docx: null };
+    for (const t of ["pptx", "docx"]) { setSelected(t, null); $(`drop-${t}`).querySelector("input").value = ""; }
+    state.editor = { open: false, slide: 1, drafts: {}, anim: {} };
+    await loadEngine();
+    notice.textContent = state.engine && !state.engine.online
+      ? "Files uploaded. The rendering engine is offline, so validation will begin as soon as it is running."
+      : "Files uploaded. Validating…";
+    notice.className = "notice success";
+    notice.hidden = false;
+    await refreshAll();
+    scheduleTick();
+  } catch (e) {
+    notice.textContent = errText(e);
+    notice.className = "notice error";
+    notice.hidden = false;
+  } finally {
+    state.uploading = false;
+    setTimeout(() => (progress.hidden = true), 1200);
+    renderFiles();
   }
-  state.pollTimer = setTimeout(pollJob, 1000);
 }
 
-function onJobFinished(job) {
-  const ok = job.status === "succeeded";
-  toast(`${JOB_LABELS[job.kind]} ${STATUS_LABELS[job.status].toLowerCase()}.`, !ok);
-  if (!ok) $("log-details").open = true;
-  refreshAll();
+// ---------- 2. produce ----------
+
+function renderProduce() {
+  const c = state.course;
+  const busyNow = courseBusy(c) || jobActive(c?.job);
+  const ready = c && c.slides?.length && c.validation?.ok !== false && ["parsed", "complete", "failed"].includes(c.status);
+
+  $("preview-btn").disabled = !(c && c.slides?.length) || busyNow;
+  const gen = $("generate-btn");
+  gen.disabled = !ready || busyNow;
+  gen.textContent = c?.hasVideo ? "Regenerate Video" : "Generate Video";
+  $("generate-desc").textContent = c?.stale
+    ? "Your saved edits are newer than the last video. Generating uses the latest saved edits only; narration for unchanged slides is reused."
+    : "Uses your latest saved edits: slide images, voiceover, topic-specific medical animations, captions, transcript and the enhanced MP4. Can take a long time for large decks.";
+
+  const r = c?.review;
+  const approvedNow = Boolean(r && r.status === "approved" && r.matchesCurrentContent);
+  $("review-btn").disabled = !c || !c.slides?.length || busyNow || r.status === "pending" || approvedNow;
+  $("review-btn").textContent = r?.status === "pending" ? "Review requested" : approvedNow ? "Approved" : "Request review";
+  const fin = $("render-final-btn");
+  fin.hidden = !(approvedNow && c.status === "complete" && !c.stale && c.animatedDraft !== false);
+  fin.disabled = busyNow;
+  const pub = $("publish-btn");
+  pub.textContent = c?.publishedAt ? "Unpublish" : "Publish";
+  pub.disabled = !c || busyNow || (c.publishedAt ? false : !(approvedNow && c.status === "complete" && !c.stale));
+  $("review-desc").textContent = !c
+    ? "AI-assisted medical content must be approved by a medical reviewer before the final version is published."
+    : c.publishedAt ? "Published: the clinically approved version is final."
+    : approvedNow ? `Approved${r.at ? ` ${fullDate(r.at)}` : ""}${r.notes ? ` — ${r.notes}` : ""}. ${c.animatedDraft === false ? "Publish when ready." : "Render the approved video to remove the draft watermark, then publish."}`
+    : r.status === "pending" ? "Waiting for a medical reviewer. Any edit you make reopens the review."
+    : r.status === "rejected" ? `Changes requested${r.notes ? `: ${r.notes}` : ""}. Edit, then request review again.`
+    : "AI-assisted medical content must be approved by a medical reviewer before the final version is published.";
 }
 
-function appendLog(lines) {
-  const pre = $("log");
-  const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
-  pre.append(document.createTextNode(lines.join("\n") + "\n"));
-  $("log-count").textContent = `(${state.logLine + lines.length} lines)`;
-  if (atBottom) pre.scrollTop = pre.scrollHeight;
+async function startGenerate() {
+  const c = state.course;
+  if (!c) return;
+  if (dirty()) {
+    if (!confirm("You have unsaved edits. Save them and generate the video from the saved version?")) return;
+    if (!(await saveEdits())) return;
+  }
+  try {
+    await call("POST", `/courses/${c.id}/build`, { animate: true });
+    toast("Video generation queued.");
+    await refreshAll();
+    scheduleTick();
+  } catch (e) { fail(e); }
 }
 
-function renderJob(job) {
-  $("job-empty").hidden = true;
-  $("job-panel").hidden = false;
-  const running = job.status === "running";
-  const p = job.progress || { percent: 0, stages: [], detail: "" };
+async function startPreview() {
+  const c = state.course;
+  if (!c) return;
+  if (dirty() && !confirm("Voice previews use your saved narration. Save your edits first?")) return;
+  if (dirty() && !(await saveEdits())) return;
+  try {
+    await call("POST", `/courses/${c.id}/preview`, { slides: $("preview-slides").value || "1-3" });
+    toast("Voice preview queued.");
+    await refreshAll();
+    scheduleTick();
+  } catch (e) { fail(e); }
+}
 
-  $("job-subtitle").textContent = `${JOB_LABELS[job.kind]}${job.args.length ? ` (${job.args.join(" ")})` : ""} · started ${fullDate(job.startedAt)}` +
-    (job.endedAt ? ` · took ${formatDuration((new Date(job.endedAt) - new Date(job.startedAt)) / 1000)}` : "");
+async function reviewAction() {
+  const c = state.course;
+  try { await call("POST", `/courses/${c.id}/review/request`, {}); toast("Sent to the medical reviewers."); await refreshAll(); } catch (e) { fail(e); }
+}
+async function renderFinal() {
+  const c = state.course;
+  try { await call("POST", `/courses/${c.id}/animate`, {}); toast("Rendering the approved video."); await refreshAll(); scheduleTick(); } catch (e) { fail(e); }
+}
+async function publishAction() {
+  const c = state.course;
+  try { await call("POST", `/courses/${c.id}/${c.publishedAt ? "unpublish" : "publish"}`, {}); toast(c.publishedAt ? "Unpublished." : "Published."); await refreshAll(); } catch (e) { fail(e); }
+}
 
+// ---------- build progress ----------
+
+function renderProgress() {
+  const job = state.course?.job;
+  const empty = $("job-empty");
+  const panel = $("job-panel");
+  const cancel = $("cancel-btn");
+  const retry = $("retry-btn");
+  if (!job) {
+    empty.hidden = false;
+    panel.hidden = true;
+    cancel.hidden = true;
+    retry.hidden = true;
+    $("job-subtitle").textContent = "No job running.";
+    return;
+  }
+  empty.hidden = true;
+  panel.hidden = false;
+  const active = jobActive(job);
+  const p = job.progress ?? {};
+  const pct = job.status === "succeeded" ? 100 : Math.round(p.percent ?? 0);
+  const offline = state.engine && !state.engine.online;
+
+  $("job-subtitle").textContent = `${JOB_LABEL[job.kind] ?? job.kind} · ${state.course.title}${job.startedAt ? ` · started ${fullDate(job.startedAt)}` : ""}` +
+    (job.finishedAt && job.startedAt ? ` · took ${formatDuration((new Date(job.finishedAt) - new Date(job.startedAt)) / 1000)}` : "");
   const badge = $("job-badge");
   badge.className = `job-badge badge-${job.status}`;
-  badge.textContent = running ? `${Math.round(p.percent)}%` : STATUS_LABELS[job.status];
-  $("job-detail").textContent = running ? p.detail : job.status === "succeeded" ? "Finished" : job.status === "cancelled" ? "Stopped" : "Stopped with an error";
-  $("job-eta").textContent = running && p.eta ? `about ${p.eta} left in this step` : "";
-
-  const percent = job.status === "succeeded" ? 100 : p.percent;
-  $("job-bar").style.width = `${percent}%`;
+  badge.textContent = job.status === "running" ? `${pct}%` : JOB_STATUS_LABEL[job.status] ?? job.status;
+  $("job-detail").textContent = job.status === "queued"
+    ? (offline ? "Waiting for the rendering engine to come online…" : "Waiting for the engine…")
+    : active ? p.detail || "Working…" : job.status === "succeeded" ? "Finished" : job.status === "cancelled" ? "Stopped" : "Stopped with an error";
+  $("job-eta").textContent = active && job.attempt > 1 ? `attempt ${job.attempt}/${job.maxAttempts}` : "";
+  $("job-bar").style.width = `${pct}%`;
   const wrap = $("job-bar-wrap");
-  wrap.setAttribute("aria-valuenow", String(Math.round(percent)));
-  wrap.classList.toggle("failed", ["failed", "interrupted"].includes(job.status));
+  wrap.setAttribute("aria-valuenow", String(pct));
+  wrap.classList.toggle("failed", job.status === "failed");
   wrap.classList.toggle("succeeded", job.status === "succeeded");
 
   const stages = $("stages");
-  stages.hidden = !p.stages.length;
-  stages.replaceChildren(...p.stages.map((s) =>
-    el("li", { "data-status": s.status, title: s.detail || s.label }, s.label, s.status === "reused" ? el("span", { class: "reused-tag", text: "· reused" }) : null)));
+  const list = p.stages ?? [];
+  stages.hidden = !list.length;
+  stages.replaceChildren(...list.map((s) => el("li", { "data-status": s.status, title: s.detail || s.label }, s.label, s.status === "reused" ? el("span", { class: "reused-tag", text: "· reused" }) : null)));
 
   const result = $("job-result");
-  if (running) {
-    result.hidden = true;
-  } else {
-    const text = job.status === "succeeded" ? job.summary || "Done." : [job.summary, job.error].filter(Boolean).join("\n\n") || "The job did not finish.";
-    result.className = `result ${job.status === "succeeded" ? "success" : "error"}`;
+  if (active) result.hidden = true;
+  else {
+    const text = job.status === "succeeded"
+      ? (state.course.error ? state.course.error : "Done.")
+      : job.error || "The job did not finish.";
+    result.className = `result ${job.status === "succeeded" && !state.course.error ? "success" : "error"}`;
     result.textContent = text;
     result.hidden = false;
   }
-  updateStatusPill();
+  cancel.hidden = !active;
+  cancel.disabled = job.cancelRequested;
+  cancel.textContent = job.cancelRequested ? "Cancelling…" : "Cancel";
+  retry.hidden = !["failed", "cancelled"].includes(job.status);
+
+  const lines = (state.logJob === job.id ? state.log : "").split("\n").filter(Boolean);
+  $("log-count").textContent = lines.length ? `(${lines.length} lines)` : "";
+  const pre = $("log");
+  const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+  pre.textContent = lines.slice(-300).join("\n");
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
 }
 
 async function cancelJob() {
-  if (!state.job || state.job.status !== "running") return;
-  if (!confirm(`Cancel the running ${JOB_LABELS[state.job.kind].toLowerCase()}? Finished slides are kept and reused next time.`)) return;
-  try {
-    await api(`/api/jobs/${encodeURIComponent(state.job.id)}/cancel`, { method: "POST" });
-  } catch (err) {
-    toast(err.message, true);
-  }
+  const job = state.course?.job;
+  if (!jobActive(job)) return;
+  if (!confirm(`Cancel the ${(JOB_LABEL[job.kind] ?? "job").toLowerCase()}? Finished slides are kept and reused next time.`)) return;
+  try { await call("POST", `/jobs/${job.id}/cancel`, {}); await refreshAll(); } catch (e) { fail(e); }
+}
+async function retryJob() {
+  const job = state.course?.job;
+  try { await call("POST", `/jobs/${job.id}/retry`, {}); toast("Job queued again."); await refreshAll(); scheduleTick(); } catch (e) { fail(e); }
 }
 
-// ---------- library ----------
+// ---------- side column ----------
 
-function renderLibrary(courses) {
-  const grid = $("library");
-  if (!courses) {
-    grid.replaceChildren(el("div", { class: "empty" }, el("p", { text: "Connect the local engine to see courses on this computer." })));
+function renderPreviews() {
+  const box = $("previews");
+  const c = state.course;
+  const items = c ? Object.entries(c.previews ?? {}).sort((a, b) => Number(a[0]) - Number(b[0])) : [];
+  if (!items.length) {
+    box.replaceChildren(el("div", { class: "empty small" }, el("p", { text: c ? "No previews yet. Use “Preview voice” to hear sample slides." : "Select a course to hear voice previews." })));
     return;
   }
-  if (!courses.length) {
-    grid.replaceChildren(el("div", { class: "empty" }, el("p", { text: "No courses in output/ yet. Upload files, validate, then Generate to create the first video." })));
+  const existing = new Map([...box.querySelectorAll("[data-clip]")].map((n) => [n.dataset.clip, n]));
+  const keep = [];
+  for (const [n, p] of items) {
+    const key = `${c.id}:${n}:${p.at}`;
+    let node = existing.get(key);
+    if (!node) {
+      const slide = c.slides.find((s) => s.slide === Number(n));
+      node = el("div", { class: "clip", "data-clip": key },
+        el("span", { class: "clip-title" }, `Slide ${n}${slide ? ` · ${slide.title}` : ""} `, p.stale ? el("span", { class: "badge badge-cancelled", text: "narration changed since" }) : null),
+        el("audio", { controls: true, preload: "none", src: `${API}/courses/${c.id}/previews/${n}?v=${encodeURIComponent(p.at)}` }),
+      );
+    }
+    keep.push(node);
+  }
+  box.replaceChildren(el("div", { class: "preview-set" }, el("div", { class: "preview-head" }, el("strong", { text: "Saved narration" }), state.engine?.tts ? ` · voice ${state.engine.tts}` : ""), ...keep));
+}
+
+function renderActivity() {
+  const list = $("activity");
+  if (!state.activity.length) {
+    list.replaceChildren(el("li", { class: "empty small" }, el("p", { text: "Your uploads and jobs appear here." })));
     return;
   }
-  const buildingSlug = state.job && state.job.status === "running" && state.job.kind === "build-course" ? state.job.courseSlug : null;
-  grid.replaceChildren(...courses.map((c) => videoCard(localItem(c), c.slug === buildingSlug)));
+  list.replaceChildren(...state.activity.slice(0, 12).map((j) => {
+    const took = j.finishedAt && j.startedAt ? ` · ${formatDuration((new Date(j.finishedAt) - new Date(j.startedAt)) / 1000)}` : "";
+    const first = (j.status === "failed" ? j.error ?? "" : "").split("\n")[0];
+    return el("li", {},
+      el("span", { class: `act-icon ${j.status === "succeeded" ? "succeeded" : j.status}`, "aria-hidden": "true", text: JOB_ICON[j.kind] ?? "•" }),
+      el("div", {},
+        el("div", { class: "act-title" }, `${JOB_LABEL[j.kind] ?? j.kind} `, el("span", { class: `badge badge-${j.status}`, text: j.status === "running" ? `${Math.round(j.progress?.percent ?? 0)}%` : JOB_STATUS_LABEL[j.status] ?? j.status })),
+        el("div", { class: "act-meta", title: fullDate(j.createdAt), text: `${j.courseTitle ?? ""} · ${timeAgo(j.startedAt ?? j.createdAt)}${took}${first ? ` · ${first}` : ""}` })),
+    );
+  }));
 }
 
-// Both libraries render from one shape: { origin, title, slug, slideCount, durationSeconds, builtAt, builtLabel, status, tts,
-// files: { video|thumbnail|vtt|srt|transcript: { url, downloadUrl, bytes } } }.
-function localItem(c) {
-  const version = c.generatedAt || c.updatedAt || "";
-  const files = {};
-  for (const [key, rel] of [["video", "final-video.mp4"], ["thumbnail", "thumbnail.jpg"], ["vtt", "captions.vtt"], ["srt", "captions.srt"], ["transcript", "transcript.txt"]]) {
-    if (c.files[key]) files[key] = { url: mediaUrl(c.slug, rel, { version }), downloadUrl: mediaUrl(c.slug, rel, { download: true }), bytes: c.files[key].bytes };
+// ---------- generated videos ----------
+
+/** Versions a course has. Order of preference when playing: approved final, enhanced draft, original. */
+function versionsOf(c) {
+  const list = [];
+  if (c.available.animated) {
+    if (c.animatedDraft === false) list.push({ key: "approved", file: "animated", label: "Clinically approved final", short: "Approved final", cls: "badge-complete" });
+    else list.push({ key: "draft", file: "animated", label: "Enhanced draft", short: "Enhanced draft", cls: "badge-cancelled" });
   }
-  return { origin: "local", title: c.title, slug: c.slug, slideCount: c.slideCount, durationSeconds: c.durationSeconds, builtAt: c.generatedAt || c.updatedAt, builtLabel: c.generatedAt ? "Built" : "Updated", status: c.status, tts: c.tts, files };
+  if (c.available.video) list.push({ key: "original", file: "video", label: "Original (narrated slides)", short: "Original", cls: "" });
+  return list;
 }
 
-function publishedItem(c) {
-  const v = encodeURIComponent(c.publishedAt || c.generatedAt || "");
-  const text = (file) => `/api/course-file?slug=${encodeURIComponent(c.slug)}&file=${file}`;
-  const files = {};
-  for (const key of ["video", "thumbnail"]) {
-    if (c.files[key]) files[key] = { url: `${c.files[key].url}?v=${v}`, downloadUrl: `${c.files[key].url}?download=1`, bytes: c.files[key].bytes };
-  }
-  for (const key of ["vtt", "srt", "transcript"]) {
-    if (c.files[key]) files[key] = { url: text(key), downloadUrl: `${text(key)}&download=1`, bytes: c.files[key].bytes };
-  }
-  return { origin: "published", title: c.title, slug: c.slug, slideCount: c.slideCount, durationSeconds: c.durationSeconds, builtAt: c.publishedAt || c.generatedAt, builtLabel: "Published", status: "complete", tts: null, files };
-}
-
-function videoCard(c, building) {
-  const playable = Boolean(c.files.video);
-  const statusText = building ? "Building…" : c.status === "complete" ? "Complete" : c.status === "failed" ? "Failed validation" : "Incomplete";
-  const badgeClass = building ? "badge" : `badge badge-${c.status}`;
+function videoCard(c) {
+  const versions = versionsOf(c);
+  const best = versions[0];
+  const busy = courseBusy(c);
+  const statusText = busy ? STATUS_LABEL[c.status] : c.publishedAt ? "Published" : best?.key === "approved" ? "Approved" : c.animatedDraft ? "Draft" : c.available.video ? "Original only" : STATUS_LABEL[c.status];
+  const statusClass = busy ? "" : c.publishedAt || best?.key === "approved" ? "badge-complete" : c.status === "failed" ? "badge-failed" : "badge-cancelled";
+  const playable = Boolean(best);
 
   const thumb = el("button", { class: "thumb", type: "button", disabled: !playable, "aria-label": playable ? `Play ${c.title}` : `${c.title} has no video yet`, onclick: () => openPlayer(c) },
-    c.files.thumbnail
-      ? el("img", { src: c.files.thumbnail.url, alt: "", loading: "lazy", width: "1280", height: "720" })
-      : el("span", { class: "noimg", text: "No thumbnail yet" }),
+    c.available.thumbnail ? el("img", { src: fileUrl(c, "thumbnail"), alt: "", loading: "lazy", width: "1280", height: "720" }) : el("span", { class: "noimg", text: busy ? "Generating…" : "No thumbnail yet" }),
     playable ? el("span", { class: "play", "aria-hidden": "true" }, svgPlay()) : null,
     c.durationSeconds ? el("span", { class: "duration", text: formatClock(c.durationSeconds) }) : null,
   );
+  const meta = [c.slideCount && `${c.slideCount} slides`, c.durationSeconds && formatDuration(c.durationSeconds), c.videoBytes && formatBytes(c.videoBytes), c.completedAt && `built ${timeAgo(c.completedAt)}`].filter(Boolean);
+  const pct = Math.round(c.job?.progress?.percent ?? 0);
 
-  const meta = [];
-  if (c.slideCount) meta.push(`${c.slideCount} slides`);
-  if (c.durationSeconds) meta.push(formatDuration(c.durationSeconds));
-  if (c.files.video) meta.push(formatBytes(c.files.video.bytes));
-  if (c.builtAt) meta.push(`${c.builtLabel} ${timeAgo(c.builtAt)}`);
+  const dl = [];
+  if (best) dl.push(el("a", { class: "btn btn-ghost small", href: fileUrl(c, best.file, true), title: `Download ${best.label}` }, "↓ Download MP4"));
+  if (best && best.key !== "original" && c.available.video) dl.push(el("a", { class: "btn btn-ghost small", href: fileUrl(c, "video", true), title: "Download the original narrated-slides MP4" }, "↓ Original MP4"));
+  for (const [k, label] of [["vtt", "VTT"], ["srt", "SRT"], ["transcript", "Transcript"]]) {
+    if (c.available[k]) dl.push(el("a", { class: "btn btn-ghost small", href: fileUrl(c, k, true), title: `Download ${label}` }, `↓ ${label}`));
+  }
 
-  return el("article", { class: "video-card" },
+  return el("article", { class: "video-card", "data-course": c.id },
     thumb,
     el("div", { class: "video-body" },
-      el("div", { class: "row between gap" }, el("h3", { class: "video-title", text: c.title }), el("span", { class: badgeClass, text: statusText })),
-      el("div", { class: "video-meta" }, ...meta.map((m) => el("span", { text: m }))),
-      c.tts ? el("div", { class: "video-meta", title: c.tts }, el("span", { text: c.tts.split(",")[0] })) : null,
+      el("div", { class: "row between gap" }, el("h3", { class: "video-title", text: c.title }), el("span", { class: `badge ${statusClass}`, text: statusText })),
+      el("div", { class: "video-meta" }, meta.map((m) => el("span", { text: m }))),
+      el("div", { class: "version-chips" }, versions.length ? versions.map((v) => el("span", { class: `badge ${v.cls}`, text: v.short })) : el("span", { class: "muted small", text: busy ? "Rendering…" : "No video yet" })),
+      busy && c.job ? el("div", { class: "job-mini" }, el("div", { class: "bar" }, el("span", { style: `width:${pct}%` })), el("span", { class: "small muted", text: c.job.progress?.detail ?? "Working…" })) : null,
+      c.stale ? el("div", { class: "video-meta" }, el("span", { text: "Edited since this video was made — regenerate to include the edits." })) : null,
     ),
     el("div", { class: "video-actions" },
       el("button", { class: "btn btn-primary small", type: "button", disabled: !playable, onclick: () => openPlayer(c) }, "Play"),
-      ...downloadLinks(c),
+      dl,
+      el("button", { class: "btn btn-secondary small", type: "button", onclick: () => editAgain(c.id) }, "Edit Again"),
     ),
   );
 }
 
-function downloadLinks(c) {
-  const links = [
-    ["video", "final-video.mp4", "Download MP4"],
-    ["vtt", "captions.vtt", "VTT"],
-    ["srt", "captions.srt", "SRT"],
-    ["transcript", "transcript.txt", "Transcript"],
-  ];
-  return links
-    .filter(([key]) => c.files[key])
-    .map(([key, file, label]) =>
-      el("a", { class: "btn btn-ghost small", href: c.files[key].downloadUrl, download: `${c.slug}-${file}`, title: `Download ${file} (${formatBytes(c.files[key].bytes)})` }, `↓ ${label}`));
+function renderVideos() {
+  const list = state.courses.filter((c) => c.hasVideo || courseBusy(c) && c.slideCount);
+  $("videos").replaceChildren(...(list.length ? list.map(videoCard) : [el("div", { class: "empty" }, el("p", { text: "Your finished videos will appear here." }))]));
 }
 
-function svgPlay() {
-  const ns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("width", "26");
-  svg.setAttribute("height", "26");
-  const path = document.createElementNS(ns, "path");
-  path.setAttribute("fill", "#fff");
-  path.setAttribute("d", "M8 5v14l11-7z");
-  svg.append(path);
-  return svg;
+async function editAgain(id) {
+  if (dirty() && state.currentId !== id && !confirm("You have unsaved edits to another course. Discard them?")) return;
+  if (state.currentId !== id) {
+    state.editor = { open: false, slide: 1, drafts: {}, anim: {} };
+    state.currentId = id;
+    storageSet(STORE_KEY, id);
+    await refreshAll();
+  }
+  openEditor();
+  $("editor-card").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-function openPlayer(c) {
-  if (!c.files.video) return;
+// ---- player (same dashboard, modal over the page)
+
+function openPlayer(c, key) {
+  const versions = versionsOf(c);
+  const v = versions.find((x) => x.key === key) ?? versions[0];
+  if (!v) return;
   const video = $("player-video");
   video.replaceChildren();
-  // Published captions are served from this site; local ones come from the engine and need CORS.
-  if (c.origin === "local") video.setAttribute("crossorigin", "anonymous");
-  else video.removeAttribute("crossorigin");
-  video.src = c.files.video.url;
-  if (c.files.thumbnail) video.poster = c.files.thumbnail.url;
-  else video.removeAttribute("poster");
-  if (c.files.vtt) {
-    video.append(el("track", { kind: "captions", label: "English", srclang: "en", src: c.files.vtt.url, default: true }));
-  }
-  $("player-title").textContent = c.title;
-  $("player-meta").textContent = [c.slideCount && `${c.slideCount} slides`, c.durationSeconds && formatDuration(c.durationSeconds), c.builtAt && `${c.builtLabel.toLowerCase()} ${fullDate(c.builtAt)}`, c.status !== "complete" && "last build did not pass final validation"]
+  video.removeAttribute("crossorigin"); // same-origin API that redirects to a signed storage URL
+  video.src = fileUrl(c, v.file);
+  if (c.available.thumbnail) video.poster = fileUrl(c, "thumbnail"); else video.removeAttribute("poster");
+  if (c.available.vtt) video.append(el("track", { kind: "captions", label: "English", srclang: "en", src: fileUrl(c, "vtt"), default: true }));
+  $("player-title").textContent = `${c.title} — ${v.label}`;
+  $("player-meta").textContent = [c.slideCount && `${c.slideCount} slides`, c.durationSeconds && formatDuration(c.durationSeconds), v.key === "draft" && "DRAFT: not clinically approved — private to your account", v.key === "approved" && "reviewed and approved by a medical reviewer"]
     .filter(Boolean).join(" · ");
-  $("player-downloads").replaceChildren(...downloadLinks(c));
-  $("player").showModal();
+  $("player-versions").replaceChildren(...versions.map((x) => el("button", { class: `tab${x.key === v.key ? " active" : ""}`, type: "button", "aria-selected": String(x.key === v.key), onclick: () => openPlayer(c, x.key) }, x.label)));
+  const links = [el("a", { class: "btn btn-ghost small", href: fileUrl(c, v.file, true) }, "↓ Download MP4")];
+  for (const [k, label] of [["vtt", "VTT"], ["srt", "SRT"], ["transcript", "Transcript"]]) if (c.available[k]) links.push(el("a", { class: "btn btn-ghost small", href: fileUrl(c, k, true) }, `↓ ${label}`));
+  $("player-downloads").replaceChildren(...links);
+  if (!$("player").open) $("player").showModal();
 }
 
 function closePlayer() {
@@ -625,161 +769,409 @@ function closePlayer() {
   $("player").close();
 }
 
-// ---------- previews ----------
+// ---------- editor (inside the dashboard) ----------
 
-function renderPreviews(sets) {
-  const box = $("previews");
-  if (!sets) {
-    box.replaceChildren(el("div", { class: "empty small" }, el("p", { text: "Connect the local engine to hear voice previews." })));
-    return;
-  }
-  if (!sets.length) {
-    box.replaceChildren(el("div", { class: "empty small" }, el("p", { text: "No previews yet. Use “Preview voice” to record sample slides." })));
-    return;
-  }
-  box.replaceChildren(...sets.slice(0, 3).map((s) =>
-    el("div", { class: "preview-set" },
-      el("div", { class: "preview-head" }, el("strong", { text: s.voice }), ` · ${timeAgo(s.generatedAt)}`),
-      ...s.clips.map((clip) =>
-        el("div", { class: "clip" },
-          el("span", { class: "clip-title", text: `${clip.title || `Slide ${clip.slide}`}${clip.seconds ? ` · ${clip.seconds.toFixed(1)}s` : ""}` }),
-          el("audio", { controls: true, preload: "none", src: mediaUrl(s.slug, clip.path, { version: s.generatedAt }) }),
-        )),
-    )));
+function openEditor() {
+  if (!state.course?.slides?.length) return;
+  state.editor.open = true;
+  $("editor-card").hidden = false;
+  if (!state.course.slides.some((s) => s.slide === state.editor.slide)) state.editor.slide = state.course.slides[0].slide;
+  renderEditor();
+  renderFiles();
+}
+function closeEditor() {
+  if (dirty() && !confirm("Close the editor and discard unsaved edits?")) return;
+  state.editor = { open: false, slide: 1, drafts: {}, anim: {} };
+  $("editor-card").hidden = true;
+  renderFiles();
+}
+const editorHasFocus = () => $("editor-card").contains(document.activeElement) && /^(TEXTAREA|INPUT|SELECT)$/.test(document.activeElement.tagName);
+
+function slideDraft(n) { return (state.editor.drafts[n] ??= {}); }
+function animDraft(n) { return (state.editor.anim[n] ??= {}); }
+
+function renderEditorChrome() {
+  const d = dirty();
+  $("editor-dirty").textContent = d ? "Unsaved changes" : "";
+  $("editor-save").disabled = !d || courseBusy(state.course);
 }
 
-// ---------- activity ----------
-
-function renderActivity(items) {
-  const list = $("activity");
-  if (!items) {
-    list.replaceChildren(el("li", { class: "empty small" }, el("p", { text: "Connect the local engine to see recent activity." })));
-    return;
-  }
-  if (!items.length) {
-    list.replaceChildren(el("li", { class: "empty small" }, el("p", { text: "Nothing yet. Uploads and jobs started from this dashboard appear here." })));
-    return;
-  }
-  list.replaceChildren(...items.slice(0, 12).map((item) => {
-    if (item.kind === "upload") {
-      const f = item.files[0];
-      return el("li", {},
-        el("span", { class: "act-icon", "aria-hidden": "true", text: JOB_ICONS.upload }),
-        el("div", {},
-          el("div", { class: "act-title", text: `Uploaded ${f ? f.type.toUpperCase() : "file"}` }),
-          el("div", { class: "act-meta", title: fullDate(item.at), text: `${f ? f.name : ""} · ${timeAgo(item.at)}` })));
-    }
-    const took = item.endedAt ? ` · ${formatDuration((new Date(item.endedAt) - new Date(item.startedAt)) / 1000)}` : "";
-    const firstLine = (item.status === "succeeded" ? item.summary : item.error || item.summary || "").split("\n")[0];
+function renderEditor() {
+  const c = state.course;
+  if (!c) return;
+  renderEditorChrome();
+  const busy = courseBusy(c);
+  const list = $("slide-list");
+  list.replaceChildren(...c.slides.map((s) => {
+    const saved = c.animationEdits?.[String(s.slide)];
+    const edited = state.editor.drafts[s.slide] || state.editor.anim[s.slide];
     return el("li", {},
-      el("span", { class: `act-icon ${item.status}`, "aria-hidden": "true", text: JOB_ICONS[item.kind] }),
-      el("div", {},
-        el("div", { class: "act-title" }, `${JOB_LABELS[item.kind]} `, el("span", { class: `badge badge-${item.status}`, text: item.status === "running" ? `${Math.round(item.progress.percent)}%` : STATUS_LABELS[item.status] })),
-        el("div", { class: "act-meta", title: fullDate(item.startedAt), text: `${timeAgo(item.startedAt)}${took}${firstLine ? ` · ${firstLine}` : ""}` })));
+      el("button", { type: "button", class: `slide-item${s.slide === state.editor.slide ? " selected" : ""}${!s.narration.trim() ? " missing" : ""}`, onclick: () => { state.editor.slide = s.slide; renderEditor(); } },
+        el("span", { class: "slide-no", text: String(s.slide) }),
+        el("span", { class: "slide-name", text: state.editor.drafts[s.slide]?.title ?? s.title }),
+        edited ? el("span", { class: "dot-edit", title: "Unsaved edit" }) : saved ? el("span", { class: "dot-saved", title: "Saved animation edit" }) : null,
+      ));
   }));
+  const pane = $("slide-pane");
+  pane.replaceChildren(slidePane(c, busy));
 }
 
-// ---------- settings ----------
+function slidePane(c, busy) {
+  const n = state.editor.slide;
+  const s = c.slides.find((x) => x.slide === n);
+  if (!s) return el("div", { class: "empty", text: "Select a slide." });
+  const d = state.editor.drafts[n] ?? {};
+  const narration = d.narration ?? s.narration;
+  const parts = [];
 
-function openSettings() {
-  $("api-input").value = state.api;
-  $("settings").showModal();
+  // preview
+  const img = c.slidePreviews
+    ? el("img", { class: "slide-img", src: `${API}/courses/${c.id}/slides/${n}/image`, alt: `Slide ${n} preview`, loading: "lazy", width: "960", height: "540" })
+    : el("div", { class: "slide-img placeholder" }, el("span", { text: "Slide preview is not available yet. It is rendered by the engine when the course is validated." }));
+  parts.push(el("div", { class: "preview-row" },
+    img,
+    el("div", { class: "slide-text" }, el("h4", { text: `Slide ${n} of ${c.slides.length} — text on the slide` }),
+      s.pptxText?.length ? el("ul", {}, s.pptxText.slice(0, 14).map((t) => el("li", { text: t }))) : el("p", { class: "muted small", text: "No text found on this slide." }),
+      el("p", { class: "muted small", text: "Your original PPTX is never changed. Overlay text and pop-ups below are added to the animated version." })),
+  ));
+
+  // title + narration
+  const title = el("input", { type: "text", maxlength: "300", value: d.title ?? s.title, disabled: busy, "aria-label": `Slide ${n} title` });
+  title.addEventListener("input", () => { slideDraft(n).title = title.value; renderEditorChrome(); markListEdited(); });
+  const text = el("textarea", { rows: "9", maxlength: "20000", disabled: busy, "aria-label": `Slide ${n} narration`, placeholder: "Narration for this slide…" });
+  text.value = narration;
+  const count = el("span", { class: "small muted" });
+  const upd = () => { const w = text.value.split(/\s+/).filter(Boolean).length; count.textContent = `${w} words · about ${formatDuration(w / 2.6)} spoken`; };
+  upd();
+  text.addEventListener("input", () => { slideDraft(n).narration = text.value; upd(); renderEditorChrome(); markListEdited(); });
+  parts.push(el("div", { class: "stack" },
+    el("label", { class: "field" }, "Slide title", title),
+    el("label", { class: "field" }, el("span", { class: "row between" }, "Voiceover narration", count), text),
+    voiceRow(c, s, busy),
+  ));
+
+  parts.push(animationBlock(c, s, busy));
+  return el("div", { class: "stack" }, parts);
 }
 
-function setupSettings() {
-  $("settings-btn").addEventListener("click", openSettings);
-  $("banner-settings").addEventListener("click", openSettings);
-  $("status-pill").addEventListener("click", () => (state.online ? refreshAll() : openSettings()));
-  $("settings-cancel").addEventListener("click", () => $("settings").close());
-  $("settings-reset").addEventListener("click", () => {
-    storageSet(STORAGE_KEY, null);
-    $("settings").close();
-    connect().then(scheduleHealth);
+function markListEdited() {
+  const items = $("slide-list").querySelectorAll(".slide-item");
+  const idx = state.course.slides.findIndex((s) => s.slide === state.editor.slide);
+  const btn = items[idx];
+  if (btn && !btn.querySelector(".dot-edit")) btn.append(el("span", { class: "dot-edit", title: "Unsaved edit" }));
+}
+
+function voiceRow(c, s, busy) {
+  const n = s.slide;
+  const p = c.previews?.[String(n)];
+  const edited = state.editor.drafts[n]?.narration !== undefined;
+  const row = el("div", { class: "voice-row" },
+    el("button", { class: "btn btn-secondary small", type: "button", disabled: busy || edited || jobActive(c.job), title: edited ? "Save your edit first — previews use the saved narration" : "", onclick: async () => {
+      try { await call("POST", `/courses/${c.id}/preview`, { slides: String(n) }); toast(`Voice preview for slide ${n} queued.`); await refreshAll(); scheduleTick(); } catch (e) { fail(e); }
+    } }, "Preview this slide's voice"),
+  );
+  if (edited) row.append(el("span", { class: "small muted", text: "Save to hear the edited narration." }));
+  else if (p) row.append(el("audio", { controls: true, preload: "none", src: `${API}/courses/${c.id}/previews/${n}?v=${encodeURIComponent(p.at)}` }), p.stale ? el("span", { class: "badge badge-cancelled", text: "older narration" }) : el("span", { class: "badge badge-complete", text: "current" }));
+  return row;
+}
+
+/** Effective animation values: unsaved draft > saved edit > current plan. */
+function effective(c, n) {
+  const plan = c.animationPlan?.find((p) => p.slide === n);
+  const saved = c.animationEdits?.[String(n)] ?? {};
+  const d = state.editor.anim[n] ?? {};
+  if (!plan) return null;
+  return {
+    plan,
+    template: d.template ?? saved.template ?? plan.template,
+    slideText: d.slideText ?? saved.slideText ?? plan.slideText,
+    popups: d.popups ?? saved.popups ?? plan.popups,
+    events: d.events ?? saved.events ?? plan.events,
+  };
+}
+
+function animationBlock(c, s, busy) {
+  const n = s.slide;
+  const box = el("section", { class: "anim-block" }, el("h4", { text: "Medical animation" }));
+  const eff = effective(c, n);
+  if (!eff) {
+    box.append(
+      el("p", { class: "muted small", text: c.animation ? "The animation plan is out of date for this slide." : "The animation plan for this course is not ready yet." }),
+      el("button", { class: "btn btn-secondary small", type: "button", disabled: busy || jobActive(c.job) || c.validation?.ok === false, onclick: refreshPlan }, "Prepare animations"),
+    );
+    return box;
+  }
+  const { plan } = eff;
+  const narr = state.editor.drafts[n]?.narration ?? s.narration;
+  if (narr.trim() !== plan.narration.trim()) {
+    box.append(el("div", { class: "notice" }, "The narration changed after this animation was planned. Save, then refresh the plan so cues and timings follow the new words. ",
+      el("button", { class: "link-btn", type: "button", disabled: dirty() || busy || jobActive(c.job), onclick: refreshPlan }, "Refresh animation plan")));
+  }
+  const tmpl = el("select", { disabled: busy, "aria-label": `Slide ${n} animation type` },
+    (state.meta?.animationTemplates ?? [plan.template]).map((t) => el("option", { value: t, text: t, selected: eff.template === t })));
+  tmpl.addEventListener("change", () => { animDraft(n).template = tmpl.value; renderEditorChrome(); markListEdited(); });
+  box.append(
+    el("p", { class: "muted small", text: plan.rationale }),
+    plan.template === "key-points" ? el("div", { class: "notice", text: "This slide uses the generic key-points layout because no topic-specific clinical scene fits it. Pick another type if one fits better." }) : null,
+    el("label", { class: "field" }, "Animation type", tmpl),
+  );
+
+  const over = el("textarea", { rows: "3", disabled: busy, "aria-label": `Slide ${n} overlay text` });
+  over.value = eff.slideText.join("\n");
+  over.addEventListener("input", () => { animDraft(n).slideText = over.value.split("\n").map((t) => t.trim()).filter(Boolean); renderEditorChrome(); markListEdited(); });
+  box.append(el("label", { class: "field" }, "On-screen text overlay (one line each)", over));
+
+  // pop-ups
+  const popBox = el("div", { class: "popups" });
+  const popups = eff.popups;
+  const setPopups = (next) => { animDraft(n).popups = next; renderEditorChrome(); markListEdited(); renderEditor(); };
+  popBox.append(el("h5", { text: "Medical explanation pop-ups" }));
+  popups.forEach((p, i) => {
+    const upd = (patch) => { const next = popups.map((x, j) => (j === i ? { ...x, ...patch } : x)); animDraft(n).popups = next; renderEditorChrome(); markListEdited(); };
+    const t = el("input", { type: "text", maxlength: "80", value: p.title, disabled: busy, "aria-label": "Pop-up title" });
+    t.addEventListener("input", () => upd({ title: t.value }));
+    const body = el("textarea", { rows: "2", maxlength: "400", disabled: busy, "aria-label": "Pop-up text" });
+    body.value = p.text;
+    body.addEventListener("input", () => upd({ text: body.value }));
+    const kind = el("select", { disabled: busy, "aria-label": "Pop-up kind" }, ["definition", "clinical", "warning"].map((k) => el("option", { value: k, text: k, selected: p.kind === k })));
+    kind.addEventListener("change", () => upd({ kind: kind.value }));
+    popBox.append(el("div", { class: "popup-edit" },
+      el("div", { class: "row gap wrap" }, t, kind,
+        el("button", { class: "btn btn-ghost danger small", type: "button", disabled: busy, onclick: () => setPopups(popups.filter((_, j) => j !== i)) }, "Remove")),
+      body,
+      timeRow("Shows from", "to", p.start, p.end, plan.durationSeconds, busy, (start, end) => upd({ start, end })),
+      p.origin !== "source" ? el("span", { class: "small muted", text: `Origin: ${p.origin} — needs clinician sign-off` }) : null,
+    ));
   });
-  $("settings-form").addEventListener("submit", (e) => {
-    e.preventDefault();
-    let value = $("api-input").value.trim().replace(/\/+$/, "");
-    try {
-      const u = new URL(value);
-      if (!/^https?:$/.test(u.protocol)) throw new Error();
-      value = u.origin;
-    } catch {
-      toast("Enter a full URL such as http://127.0.0.1:8788", true);
-      return;
+  popBox.append(el("button", { class: "btn btn-secondary small", type: "button", disabled: busy || popups.length >= 20, onclick: () => {
+    const start = Math.min(1, Math.max(0, plan.durationSeconds - 3));
+    setPopups([...popups, { id: `custom-${Date.now().toString(36)}`, title: "Note", text: "", kind: "clinical", start, end: Math.min(plan.durationSeconds, start + 5), origin: "source" }]);
+  } }, "Add pop-up"));
+  box.append(popBox);
+
+  // timings
+  const evBox = el("div", { class: "timings" }, el("h5", { text: `Animation timings (slide lasts ${plan.durationSeconds.toFixed(1)} s${plan.durationSource === "estimated" ? ", estimated until the video is generated" : ""})` }));
+  eff.events.forEach((ev, i) => {
+    const upd = (start, end) => { const next = eff.events.map((x, j) => (j === i ? { ...x, start, end } : x)); animDraft(n).events = next; renderEditorChrome(); markListEdited(); };
+    evBox.append(el("div", { class: "event-row" },
+      el("span", { class: "event-name", title: ev.cue ?? "", text: `${c.animationEdits?.[String(n)]?.labels?.[ev.element] ?? plan.labels?.[ev.element] ?? ev.element} · ${ev.action}` }),
+      timeRow("", "→", ev.start, ev.end, plan.durationSeconds, busy, upd),
+    ));
+  });
+  box.append(evBox);
+
+  const unack = plan.flags.filter((f) => !f.acknowledged);
+  if (unack.length) box.append(el("ul", { class: "flags" }, unack.map((f) => el("li", {}, el("strong", { text: f.kind }), `: ${f.text}`))));
+  if (c.animationEdits?.[String(n)]) {
+    box.append(el("button", { class: "btn btn-ghost small", type: "button", disabled: busy, onclick: async () => {
+      try { await call("PATCH", `/courses/${c.id}/animation`, { slide: n, reset: true }); delete state.editor.anim[n]; toast("Animation edits for this slide were reset."); await refreshAll(); renderEditor(); } catch (e) { fail(e); }
+    } }, "Reset animation edits for this slide"));
+  }
+  return box;
+}
+
+function timeRow(labelA, labelB, a, b, max, busy, onChange) {
+  const mk = (val, aria) => el("input", { type: "number", min: "0", max: String(Math.ceil(max)), step: "0.1", value: String(Math.round(val * 10) / 10), disabled: busy, "aria-label": aria });
+  const x = mk(a, "start seconds");
+  const y = mk(b, "end seconds");
+  const fire = () => {
+    let s = Math.max(0, Math.min(max, Number(x.value) || 0));
+    let e = Math.max(s + 0.1, Math.min(max, Number(y.value) || 0));
+    onChange(Math.round(s * 100) / 100, Math.round(e * 100) / 100);
+  };
+  x.addEventListener("change", fire);
+  y.addEventListener("change", fire);
+  return el("span", { class: "time-row" }, labelA ? el("span", { class: "small muted", text: labelA }) : null, x, el("span", { class: "small muted", text: labelB }), y, el("span", { class: "small muted", text: "s" }));
+}
+
+async function refreshPlan() {
+  const c = state.course;
+  try { await call("POST", `/courses/${c.id}/plan`, {}); toast("Refreshing the animation plan…"); await refreshAll(); scheduleTick(); } catch (e) { fail(e); }
+}
+
+/** Save narration/title edits and animation edits. Returns true on success. */
+async function saveEdits() {
+  const c = state.course;
+  if (!c || !dirty()) return true;
+  try {
+    const slides = Object.entries(state.editor.drafts).map(([slide, d]) => ({ slide: Number(slide), ...d }));
+    if (slides.length) await call("PATCH", `/courses/${c.id}`, { slides });
+    for (const [slide, edit] of Object.entries(state.editor.anim)) {
+      if (Object.keys(edit).length) await call("PATCH", `/courses/${c.id}/animation`, { slide: Number(slide), edit });
     }
-    storageSet(STORAGE_KEY, value);
-    state.api = value;
-    $("settings").close();
-    checkHealth().then(scheduleHealth);
-  });
-}
-
-// ---------- navigation (dashboard <-> AI Animation Studio, one page, one server) ----------
-
-function currentView() {
-  const cloud = cloudView();
-  if (cloud) return cloud;
-  if (location.hash.startsWith("#/studio")) return "studio";
-  // The hosted site opens on the cloud workspace; the local engine page keeps the original dashboard.
-  if (!location.hash && location.protocol === "https:") return "cloud";
-  return "dashboard";
-}
-
-function syncStudioFrame() {
-  const frame = $("studio-frame");
-  const want = `${state.api}/studio/?embed=1`;
-  // Load lazily, and again if the engine address changed.
-  if (currentView() === "studio" && frame.dataset.loaded !== want) {
-    frame.dataset.loaded = want;
-    frame.src = want;
+    const reopened = c.review.status !== "none";
+    state.editor.drafts = {};
+    state.editor.anim = {};
+    await loadCurrent();
+    await loadCourses();
+    toast(reopened ? "Saved. Medical review is needed again for the changed content." : "Saved. Generate Video will use these edits.");
+    renderAll({ force: true });
+    return true;
+  } catch (e) {
+    fail(e);
+    return false;
   }
 }
 
-function showView() {
-  const view = currentView();
-  $("dashboard-view").hidden = view !== "dashboard";
-  $("studio-view").hidden = view !== "studio";
-  for (const v of ["cloud", "review", "admin"]) $(v + "-view").hidden = view !== v;
-  if (["cloud", "review", "admin"].includes(view)) {
-    if (!cloudView()) location.hash = "#/cloud";
-    showCloud();
-  }
-  document.body.dataset.view = view;
-  document.querySelectorAll(".nav-link").forEach((a) => {
-    if (a.dataset.view === view) a.setAttribute("aria-current", "page");
-    else a.removeAttribute("aria-current");
-  });
-  document.title = view === "studio" ? "AI Animation Studio — Doctyn Course Studio" : "Doctyn Course Studio";
-  syncStudioFrame();
+// ---------- medical review queue + administration (same page, role based) ----------
+
+function renderRoleAreas() {
+  const role = state.user?.role;
+  $("review-card").hidden = !(role === "reviewer" || role === "admin");
+  $("admin-card").hidden = role !== "admin";
 }
 
-// ---------- boot ----------
+async function loadReviewQueue() {
+  if (!["reviewer", "admin"].includes(state.user?.role)) return;
+  const box = $("review-list");
+  try {
+    const { courses } = await call("GET", "/reviews");
+    box.replaceChildren(courses.length
+      ? el("div", { class: "course-list" }, courses.map((c) => el("article", { class: "course-row" },
+        el("div", { class: "row between gap wrap" }, el("h3", { class: "video-title", text: c.title }), el("span", { class: "muted small", text: `${c.ownerName} · ${c.slideCount} slides · requested ${timeAgo(c.updatedAt)}` })),
+        el("div", { class: "video-actions" }, el("button", { class: "btn btn-primary small", type: "button", onclick: () => openReview(c.id) }, "Review")),
+      )))
+      : el("div", { class: "empty" }, el("p", { text: "Nothing is waiting for review." })));
+  } catch (e) { box.replaceChildren(el("div", { class: "notice error", text: errText(e) })); }
+}
 
-function boot() {
-  window.addEventListener("hashchange", showView);
-  showView();
+async function openReview(id) {
+  try {
+    const { course } = await call("GET", `/reviews/${id}`);
+    const notes = el("textarea", { rows: "3", maxlength: "4000", placeholder: "Notes (required when requesting changes)", "aria-label": "Review notes" });
+    const decide = (decision) => async () => {
+      try {
+        await call("POST", `/courses/${id}/review`, { decision, notes: notes.value });
+        toast(decision === "approved" ? "Approved." : "Changes requested.");
+        $("review-dialog").close();
+        await Promise.all([loadReviewQueue(), refreshAll()]);
+      } catch (e) { fail(e); }
+    };
+    const plan = course.animationPlan ?? [];
+    $("review-dialog-title").textContent = course.title;
+    $("review-body").replaceChildren(
+      el("p", { class: "muted small", text: "You are approving the narration below and, where present, the animation callouts and flagged items. Approval covers this version only." }),
+      ...course.slides.map((s) => {
+        const a = plan.find((p) => p.slide === s.slide);
+        const open = a ? a.flags.filter((f) => !f.acknowledged) : [];
+        return el("details", { class: "anim-slide" },
+          el("summary", {}, el("strong", { text: `Slide ${s.slide}` }), ` ${s.title} `, open.length ? el("span", { class: "badge badge-cancelled", text: `${open.length} flag${open.length > 1 ? "s" : ""}` }) : null),
+          el("div", { class: "stack" },
+            el("p", { class: "narration", text: s.narration }),
+            a ? el("p", { class: "muted small", text: `Animation: ${a.template}. ${a.rationale}` }) : null,
+            a?.slideText?.length ? el("p", { class: "small", text: `On screen: ${a.slideText.join(" / ")}` }) : null,
+            ...(a?.popups ?? []).map((p) => el("p", { class: "small" }, el("strong", { text: `${p.title} (${p.kind}, ${p.origin}): ` }), p.text)),
+            open.length ? el("ul", { class: "flags" }, open.map((f) => el("li", {}, el("strong", { text: f.kind }), `: ${f.text}`))) : null,
+          ));
+      }),
+      notes,
+      el("div", { class: "row gap wrap right" },
+        el("button", { class: "btn btn-ghost danger", type: "button", onclick: decide("rejected") }, "Request changes"),
+        el("button", { class: "btn btn-primary", type: "button", onclick: decide("approved") }, "Approve this version"),
+      ),
+    );
+    $("review-dialog").showModal();
+  } catch (e) { fail(e); }
+}
+
+const stat = (label, value) => el("div", { class: "stat" }, el("strong", { text: String(value) }), el("span", { class: "muted small", text: label }));
+const cardOf = (title, sub, ...body) => el("section", { class: "card" }, el("div", { class: "card-head" }, el("div", {}, el("h2", { text: title }), sub ? el("p", { class: "muted", text: sub }) : null)), ...body);
+
+async function loadAdmin() {
+  if (state.user?.role !== "admin") return;
+  const root = $("admin-root");
+  try {
+    const [o, u, j, c] = await Promise.all([
+      call("GET", "/admin/overview"), call("GET", "/admin/users"),
+      call("GET", `/admin/jobs${state.adminFilter ? `?status=${state.adminFilter}` : ""}`), call("GET", "/admin/courses"),
+    ]);
+    const n = (obj, k) => obj?.[k] ?? 0;
+    const sel = (user, field, options) => {
+      const s = el("select", { disabled: user.id === state.user.id, "aria-label": `${field} for ${user.email}` }, options.map((x) => el("option", { value: x, text: x, selected: user[field] === x })));
+      s.addEventListener("change", async () => { try { await call("PATCH", `/admin/users/${user.id}`, { [field]: s.value }); toast("Updated."); } catch (e) { fail(e); } loadAdmin(); });
+      return s;
+    };
+    const filter = el("select", { "aria-label": "Filter jobs by status" }, ["", "queued", "running", "failed", "cancelled", "succeeded"].map((s) => el("option", { value: s, text: s || "all", selected: state.adminFilter === s })));
+    filter.addEventListener("change", () => { state.adminFilter = filter.value; loadAdmin(); });
+    root.replaceChildren(
+      cardOf("Administration", "Users, jobs and storage across the platform. Administrators manage accounts and jobs; the API never gives them other users' course content.",
+        el("div", { class: "stats" }, stat("Active users", n(o.users, "active")), stat("Awaiting approval", n(o.users, "pending")), stat("Courses", Object.values(o.courses).reduce((a, b) => a + b, 0)),
+          stat("Jobs running", n(o.jobs, "running")), stat("Jobs queued", n(o.jobs, "queued")), stat("Jobs failed", n(o.jobs, "failed")), stat("Stored", formatBytes(o.storageBytes) || "0 B"))),
+      cardOf("Users", null, el("div", { class: "table-wrap" }, el("table", { class: "table" },
+        el("thead", {}, el("tr", {}, ["Name", "Email", "Status", "Role", "Courses", "Storage", "Last sign-in"].map((h) => el("th", { text: h })))),
+        el("tbody", {}, u.users.map((x) => el("tr", {}, el("td", { text: x.name }), el("td", { text: x.email }), el("td", {}, sel(x, "status", ["pending", "active", "disabled"])), el("td", {}, sel(x, "role", ["user", "reviewer", "admin"])),
+          el("td", { text: String(x.courses) }), el("td", { text: formatBytes(x.storageBytes) || "0 B" }), el("td", { text: x.lastLoginAt ? timeAgo(x.lastLoginAt) : "never" }))))))),
+      el("section", { class: "card" }, el("div", { class: "card-head" }, el("div", {}, el("h2", { text: "Jobs" }), el("p", { class: "muted", text: "Cancel stuck jobs and retry failed renders." })), filter),
+        el("div", { class: "table-wrap" }, el("table", { class: "table" },
+          el("thead", {}, el("tr", {}, ["Course", "Kind", "Status", "Attempt", "Started", "Error", ""].map((h) => el("th", { text: h })))),
+          el("tbody", {}, j.jobs.length ? j.jobs.map((x) => el("tr", {}, el("td", { text: x.courseTitle ?? x.courseId }), el("td", { text: x.kind }), el("td", {}, el("span", { class: `badge badge-${x.status}`, text: x.status })),
+            el("td", { text: `${x.attempt}/${x.maxAttempts}` }), el("td", { text: x.startedAt ? timeAgo(x.startedAt) : "—" }), el("td", { class: "err-cell", title: x.error ?? "", text: (x.error ?? "").split("\n")[0].slice(0, 90) }),
+            el("td", { class: "row gap" },
+              ["queued", "running"].includes(x.status) ? el("button", { class: "btn btn-ghost danger small", type: "button", onclick: async () => { try { await call("POST", `/admin/jobs/${x.id}/cancel`, {}); } catch (e) { fail(e); } loadAdmin(); } }, "Cancel") : null,
+              ["failed", "cancelled"].includes(x.status) ? el("button", { class: "btn btn-secondary small", type: "button", onclick: async () => { try { await call("POST", `/admin/jobs/${x.id}/retry`, {}); } catch (e) { fail(e); } loadAdmin(); } }, "Retry") : null))) : [el("tr", {}, el("td", { colspan: "7", class: "muted", text: "No jobs." }))])))),
+      cardOf("Courses and storage", null, el("div", { class: "table-wrap" }, el("table", { class: "table" },
+        el("thead", {}, el("tr", {}, ["Title", "Owner", "Status", "Video", "Updated", ""].map((h) => el("th", { text: h })))),
+        el("tbody", {}, c.courses.length ? c.courses.map((x) => el("tr", {}, el("td", { text: x.title }), el("td", { text: `${x.ownerName} (${x.ownerEmail})` }),
+          el("td", {}, el("span", { class: `badge ${STATUS_CLASS[x.status] ?? ""}`, text: STATUS_LABEL[x.status] ?? x.status })), el("td", { text: x.videoBytes ? formatBytes(x.videoBytes) : "—" }), el("td", { text: timeAgo(x.updatedAt) }),
+          el("td", {}, el("button", { class: "btn btn-ghost danger small", type: "button", onclick: async () => {
+            if (!confirm(`Delete "${x.title}" for ${x.ownerEmail} and remove its files from storage?`)) return;
+            try { await call("DELETE", `/admin/courses/${x.id}`); } catch (e) { fail(e); } loadAdmin();
+          } }, "Delete")))) : [el("tr", {}, el("td", { colspan: "6", class: "muted", text: "No courses." }))])))),
+    );
+  } catch (e) { root.replaceChildren(el("div", { class: "notice error", text: errText(e) })); }
+}
+
+// ---------- wiring ----------
+
+function setupStatic() {
   setupDropzones();
-  setupSettings();
   $("upload-btn").addEventListener("click", uploadSelected);
-  document.querySelectorAll("[data-job]").forEach((b) => b.addEventListener("click", () => startJob(b.dataset.job)));
+  $("edit-btn").addEventListener("click", () => (state.editor.open ? closeEditor() : openEditor()));
+  $("editor-close").addEventListener("click", closeEditor);
+  $("editor-save").addEventListener("click", () => saveEdits());
+  $("preview-btn").addEventListener("click", startPreview);
+  $("generate-btn").addEventListener("click", startGenerate);
+  $("review-btn").addEventListener("click", reviewAction);
+  $("render-final-btn").addEventListener("click", renderFinal);
+  $("publish-btn").addEventListener("click", publishAction);
   $("cancel-btn").addEventListener("click", cancelJob);
-  $("refresh-btn").addEventListener("click", () => (state.online ? refreshAll() : checkHealth()));
-  $("published-refresh-btn").addEventListener("click", () => refreshPublished());
-  $("banner-retry").addEventListener("click", () => connect().then(scheduleHealth));
-  $("player-close").addEventListener("click", closePlayer);
-  $("player").addEventListener("cancel", (e) => {
-    e.preventDefault();
-    closePlayer();
+  $("retry-btn").addEventListener("click", retryJob);
+  $("refresh-btn").addEventListener("click", () => refreshAll());
+  $("status-pill").addEventListener("click", () => refreshAll());
+  $("banner-retry").addEventListener("click", async () => { await loadSession(); if (state.user) await refreshAll(); else location.reload(); });
+  $("log-details").addEventListener("toggle", () => loadLog().then(renderProgress));
+  $("course-select").addEventListener("change", async (e) => {
+    const v = e.target.value;
+    if (dirty() && !confirm("Switch course and discard unsaved edits?")) { renderCoursePicker(); return; }
+    state.editor = { open: false, slide: 1, drafts: {}, anim: {} };
+    $("editor-card").hidden = true;
+    state.currentId = v === "__new__" ? null : v;
+    storageSet(STORE_KEY, v === "__new__" ? "new" : v);
+    $("course-title").value = "";
+    await loadCurrent();
+    await loadLog();
+    renderAll({ force: true });
   });
+  $("course-title").addEventListener("change", async () => {
+    const c = state.course;
+    const t = $("course-title").value.trim();
+    if (!c || !t || t === c.title) return;
+    try { await call("PATCH", `/courses/${c.id}`, { title: t }); await refreshAll(); toast("Title saved."); } catch (e) { fail(e); }
+  });
+  $("player-close").addEventListener("click", closePlayer);
+  $("player").addEventListener("cancel", (e) => { e.preventDefault(); closePlayer(); });
   $("player").addEventListener("click", (e) => e.target === $("player") && closePlayer());
-  $("banner-api").textContent = state.api;
-  $("footer-api").textContent = state.api;
-  updateControls();
-  refreshPublished();
-  connect().then(scheduleHealth);
-  // Keep relative times fresh.
-  setInterval(() => state.online && !document.hidden && refreshActivity().catch(() => {}), 30000);
+  $("review-close").addEventListener("click", () => $("review-dialog").close());
+  window.addEventListener("beforeunload", (e) => { if (dirty()) { e.preventDefault(); e.returnValue = ""; } });
 }
 
-boot();
-setupCloud();
+// Review queue and admin lists (role based, same page) load when the page is ready and refresh slowly.
+async function slowAreas() {
+  await Promise.all([loadReviewQueue(), loadAdmin()]);
+}
+boot().then(() => {
+  if (state.user && !state.unavailable) {
+    slowAreas();
+    setInterval(() => !document.hidden && slowAreas(), 30000);
+  }
+});

@@ -35,6 +35,7 @@ runMain(async () => {
     inputDir: config.inputDir,
     outputDir: config.outputDir,
     publicDir: path.join(PROJECT_ROOT, "public"),
+    indexFile: "legacy/index.html",
     allowedOrigins,
     tts:
       config.tts.provider === "kokoro"

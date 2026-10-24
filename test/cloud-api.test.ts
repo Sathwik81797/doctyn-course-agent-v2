@@ -6,7 +6,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { cloudConfig } from "../cloud/config.js";
 import { createDb, type Db } from "../cloud/db.js";
-import { claim, heartbeat, markFailed, markSucceeded, reapStale } from "../cloud/queue.js";
+import { claim, heartbeat, markFailed, markSucceeded, reapStale, workerGone, workerSeen } from "../cloud/queue.js";
 import { handleApi, type Ctx } from "../cloud/routes.js";
 import { createStorage } from "../cloud/storage.js";
 import { contentHash } from "../cloud/util.js";
@@ -317,5 +317,40 @@ describe("job queue", () => {
     assert.equal((await call("POST", `/api/v3/jobs/${q.body.job.id}/cancel`, {}, other)).status, 404);
     assert.equal((await call("POST", `/api/v3/jobs/${q.body.job.id}/cancel`, {}, owner)).body.result, "cancelled");
     assert.equal(ownerId.length > 10, true);
+  });
+});
+
+describe("Windows engine presence", () => {
+  it("reports the engine offline until a worker checks in, online while it does, offline after it stops", async () => {
+    const cookie = await signedIn("engine@example.com");
+    assert.equal((await call("GET", "/api/v3/engine")).status, 401);
+    assert.equal((await call("GET", "/api/v3/engine", undefined, cookie)).body.online, false);
+
+    await workerSeen(ctx.db, { id: "pc-1", hostname: "DESKTOP-PC", info: { tts: "kokoro" } });
+    const on = (await call("GET", "/api/v3/engine", undefined, cookie)).body;
+    assert.equal(on.online, true);
+    assert.equal(on.tts, "kokoro");
+
+    await ctx.db.query("UPDATE workers SET last_seen = now() - interval '5 minutes' WHERE id = 'pc-1'");
+    assert.equal((await call("GET", "/api/v3/engine", undefined, cookie)).body.online, false, "a PC that stopped beating is offline");
+
+    await workerSeen(ctx.db, { id: "pc-1", hostname: "DESKTOP-PC" });
+    await workerGone(ctx.db, "pc-1");
+    assert.equal((await call("GET", "/api/v3/engine", undefined, cookie)).body.online, false);
+  });
+
+  it("frees a job held by a PC that was switched off so it resumes when the PC returns", async () => {
+    const cookie = await signedIn("offpc@example.com");
+    const id = (await call("POST", "/api/v3/courses", { title: "PC off" }, cookie)).body.course.id;
+    const slides = [{ slide: 1, title: "A", narration: "Hello." }];
+    await ctx.db.query("UPDATE courses SET status='parsed', slide_count=1, slides=$2::jsonb, content_hash=$3, validation='{\"ok\":true}'::jsonb WHERE id=$1", [id, JSON.stringify(slides), contentHash("PC off", slides)]);
+    await ctx.db.query("UPDATE jobs SET status = 'cancelled' WHERE status = 'queued'");
+    await call("POST", `/api/v3/courses/${id}/build`, {}, cookie);
+    const job = await claim(ctx.db, "pc-off");
+    assert.ok(job);
+    await ctx.db.query("UPDATE jobs SET heartbeat_at = now() - interval '10 minutes' WHERE id = $1", [job.id]);
+    await call("GET", "/api/v3/engine", undefined, cookie); // the website notices; no worker needed
+    const after = (await ctx.db.query("SELECT status, locked_by FROM jobs WHERE id = $1", [job.id])).rows[0];
+    assert.deepEqual(after, { status: "queued", locked_by: null });
   });
 });

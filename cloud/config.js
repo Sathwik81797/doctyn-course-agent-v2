@@ -19,6 +19,8 @@
  * @property {number} jobMaxAttempts
  * @property {number} staleJobSeconds
  * @property {string[]} allowedOrigins
+ * @property {boolean} allowSelfReview
+ * @property {boolean} devAutoLogin  development server only: sign in the single local user automatically
  */
 
 /** @param {Record<string, string | undefined>} [env] @returns {CloudConfig} */
@@ -53,6 +55,8 @@ export function cloudConfig(env = process.env) {
     jobMaxAttempts: num("JOB_MAX_ATTEMPTS", 3),
     staleJobSeconds: num("STALE_JOB_SECONDS", 120),
     allowedOrigins: list(env.APP_ORIGINS),
+    allowSelfReview: env.ALLOW_SELF_REVIEW === "true",
+    devAutoLogin: !production && env.DEV_AUTO_LOGIN === "true",
   };
 }
 

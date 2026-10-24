@@ -11,15 +11,22 @@ import { formatValidationReport, validateMapping } from "../services/validation.
 import { PROJECT_ROOT } from "../utils/config.js";
 import { ensureDir, exists } from "../utils/files.js";
 import { slugify } from "../utils/slug.js";
+import sharp from "sharp";
+import { readSlideTexts } from "../animation/pptx-text.js";
+import { convertPptxToPdf, rasterizePdf } from "../services/render-slides.js";
+import { loadConfig } from "../utils/config.js";
 import { buildVoiceoverDocx } from "./docx-builder.js";
+import { runAnimate } from "./animate-job.js";
+import { storePlan, workspace as planWorkspace, writeInputs } from "./plan.js";
 
 export interface WorkerJob {
   id: string;
   course_id: string;
   owner_id: string;
-  kind: "parse" | "build" | "animate";
+  kind: "parse" | "build" | "animate" | "preview" | "plan";
   attempt: number;
   max_attempts: number;
+  payload?: { animate?: boolean; slides?: number[]; import?: { outputs: Record<string, { key: string; bytes: number; draft?: boolean }>; durationSeconds: number; completedAt: string; animatedDraft: boolean | null } };
 }
 
 /** Thrown for problems that retrying cannot fix (bad file, missing narration). */
@@ -47,7 +54,7 @@ export async function runParse(job: WorkerJob, env: JobEnv): Promise<void> {
   const { ctx } = env;
   const course = await loadCourse(ctx, job.course_id);
   if (!course.pptx_key || !course.docx_key) throw new PermanentJobError("Both a PPTX and a DOCX are needed.");
-  await ctx.db.query("UPDATE courses SET status = 'parsing', error = NULL, updated_at = now() WHERE id = $1", [course.id]);
+  await ctx.db.query("UPDATE courses SET status = 'parsing', error = NULL, slide_previews = false, previews = '{}'::jsonb, updated_at = now() WHERE id = $1", [course.id]);
 
   const dir = path.join(env.workRoot, course.id, "parse");
   await fs.rm(dir, { recursive: true, force: true });
@@ -56,18 +63,21 @@ export async function runParse(job: WorkerJob, env: JobEnv): Promise<void> {
   const docxFile = path.join(dir, "voiceover.docx");
   await ctx.storage.downloadToFile(course.pptx_key, pptxFile);
   await ctx.storage.downloadToFile(course.docx_key, docxFile);
-  await env.progress({ percent: 30, stage: "parse", detail: "Reading the presentation and script…" });
+  await env.progress({ percent: 10, stage: "parse", detail: "Reading the presentation and script…" });
 
+  let finalStatus: "parsed" | "invalid" = "invalid";
+  let finalError: string | null = null;
   try {
     const pptx = await parsePptx(pptxFile);
     const docx = await parseDocx(docxFile);
     const v = validateMapping(pptx, docx);
+    const texts = await readSlideTexts(pptxFile, pptx.slides.map((s) => s.entry)).catch(() => [] as string[][]);
 
     // One editable record per real slide. Narration is taken by slide number; gaps stay empty for the user to fill.
     const byNumber = new Map(v.ordered.map((r) => [r.number, r]));
-    const slides = pptx.slides.map((s) => {
+    const slides = pptx.slides.map((s, i) => {
       const rec = byNumber.get(s.number) ?? docx.records.find((r) => r.number === s.number);
-      return { slide: s.number, title: rec?.title || s.title || `Slide ${s.number}`, narration: rec?.text ?? "", pptxTitle: s.title };
+      return { slide: s.number, title: rec?.title || s.title || `Slide ${s.number}`, narration: rec?.text ?? "", pptxTitle: s.title, pptxText: texts[i] ?? [] };
     });
     const emptyNow = slides.filter((s) => !s.narration.trim()).map((s) => s.slide);
     const validation = {
@@ -83,37 +93,81 @@ export async function runParse(job: WorkerJob, env: JobEnv): Promise<void> {
       report: v.ok ? null : formatValidationReport(v, course.pptx_name ?? "presentation.pptx", course.docx_name ?? "voiceover.docx"),
     };
     const hash = contentHash(course.title, slides);
+    // The status stays "parsing" until previews and the animation plan are ready.
     await ctx.db.query(
-      `UPDATE courses SET status = $2, slide_count = $3, slides = $4::jsonb, validation = $5::jsonb, content_hash = $6,
-              error = $7, updated_at = now() WHERE id = $1`,
-      [
-        course.id,
-        v.ok ? "parsed" : "invalid",
-        pptx.slideCount,
-        JSON.stringify(slides),
-        JSON.stringify(validation),
-        hash,
-        v.ok ? null : `The presentation has ${v.pptxCount} slides but the script has ${v.narrationCount} narration sections. Fix the narration below or upload a corrected script.`,
-      ],
+      "UPDATE courses SET slide_count = $2, slides = $3::jsonb, validation = $4::jsonb, content_hash = $5, animation = NULL, updated_at = now() WHERE id = $1",
+      [course.id, pptx.slideCount, JSON.stringify(slides), JSON.stringify(validation), hash],
     );
+    if (job.payload?.import && v.ok) await ctx.db.query("UPDATE courses SET built_hash = content_hash WHERE id = $1", [course.id]);
+    finalStatus = v.ok ? "parsed" : "invalid";
+    finalError = v.ok ? null : `The presentation has ${v.pptxCount} slides but the script has ${v.narrationCount} narration sections. Fix the narration below or upload a corrected script.`;
+
+    // Slide images for the editor. Not fatal: the build renders slides again anyway and reports LibreOffice problems.
+    await env.progress({ percent: 30, stage: "parse", detail: "Rendering slide previews…" });
+    try {
+      await renderSlidePreviews(env, course, pptxFile, pptx.slideCount, dir, pptx.hiddenSlideNumbers.length > 0);
+    } catch (err) {
+      await env.progress({ percent: 60, stage: "parse", detail: `Slide previews unavailable: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}` });
+    }
+
+    // Animation plan from the saved narration, so slides can be edited before any video exists.
+    if (v.ok) {
+      await env.progress({ percent: 75, stage: "parse", detail: "Planning medical animations…" });
+      try {
+        const fresh = await loadCourse(ctx, course.id);
+        const ws = planWorkspace(env.workRoot, fresh);
+        await writeInputs(env, fresh, ws, pptxFile);
+        await storePlan(env, fresh, ws);
+      } catch (err) {
+        if (err instanceof CancelledError) throw err;
+        await env.progress({ percent: 90, stage: "parse", detail: `Animation plan unavailable: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}` });
+      }
+    }
   } catch (err) {
+    if (err instanceof CancelledError) throw err;
     // Unreadable or malformed files are the user's to fix; do not retry.
     const message = err instanceof Error ? err.message : String(err);
-    await ctx.db.query("UPDATE courses SET status = 'invalid', error = $2, validation = $3::jsonb, updated_at = now() WHERE id = $1", [
-      course.id,
-      message.split("\n")[0]?.slice(0, 400) ?? "The files could not be read.",
-      JSON.stringify({ ok: false, report: message.slice(0, 4000) }),
-    ]);
+    finalStatus = "invalid";
+    finalError = message.split("\n")[0]?.slice(0, 400) ?? "The files could not be read.";
+    await ctx.db.query("UPDATE courses SET validation = $2::jsonb WHERE id = $1", [course.id, JSON.stringify({ ok: false, report: message.slice(0, 4000) })]);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+  await ctx.db.query("UPDATE courses SET status = $2, error = $3, updated_at = now() WHERE id = $1", [course.id, finalStatus, finalError]);
+  const imp = job.payload?.import;
+  if (imp && finalStatus === "parsed") {
+    // An imported course arrives with its finished videos: show them, and mark the enhanced one as the draft it is.
+    await ctx.db.query(
+      `UPDATE courses SET status = 'complete', outputs = $2::jsonb, duration_seconds = $3, completed_at = $4,
+              animation = CASE WHEN animation IS NULL THEN NULL ELSE animation || $5::jsonb END, updated_at = now() WHERE id = $1`,
+      [course.id, JSON.stringify(imp.outputs), imp.durationSeconds, imp.completedAt, JSON.stringify({ rendered: imp.animatedDraft !== null, draft: imp.animatedDraft })],
+    );
+  } else if (imp) {
+    await ctx.db.query("UPDATE courses SET built_hash = NULL WHERE id = $1", [course.id]);
+  }
   await env.progress({ percent: 100, stage: "parse", detail: "Done" });
+}
+
+/** 960x540 JPEGs of every slide, stored privately for the editor. */
+async function renderSlidePreviews(env: JobEnv, course: any, pptx: string, slideCount: number, dir: string, hidden: boolean): Promise<void> {
+  const config = loadConfig();
+  const work = path.join(dir, "pdf");
+  const pdf = await convertPptxToPdf({ pptx, workDir: work, config, exportHiddenSlides: hidden });
+  const { pngs } = await rasterizePdf({ pdf, slidesDir: path.join(dir, "png"), workDir: work, expectedPages: slideCount, config });
+  const keys = courseKeys(course.owner_id, course.id);
+  for (const [i, png] of pngs.entries()) {
+    const jpg = path.join(dir, `prev-${i + 1}.jpg`);
+    await sharp(png).resize(960, 540, { fit: "contain", background: "#000000" }).jpeg({ quality: 78 }).toFile(jpg);
+    await env.ctx.storage.uploadFromFile(keys.slideImage(i + 1), jpg, "image/jpeg");
+  }
+  await env.ctx.db.query("UPDATE courses SET slide_previews = true WHERE id = $1", [course.id]);
 }
 
 // ---------------------------------------------------------------- build
 
 /** Files worth keeping between attempts so a crash never re-runs paid or slow TTS. */
-const CACHE_DIRS = ["audio", "slides"] as const;
+// Finished work that a later edit can reuse: only slides whose text changed are re-recorded or re-rendered.
+export const CACHE_DIRS = ["audio", "slides", "video-segments", "animation/enhanced/segments"] as const;
 
 export async function syncCacheUp(env: JobEnv, ownerId: string, courseId: string, courseDir: string): Promise<void> {
   const { storage } = env.ctx;
@@ -128,17 +182,18 @@ export async function syncCacheUp(env: JobEnv, ownerId: string, courseId: string
     const local = path.join(courseDir, rel);
     const st = await fs.stat(local);
     if (rel === "checkpoint.json" || remote.get(prefix + rel) !== st.size) {
-      await storage.uploadFromFile(prefix + rel, local, rel.endsWith(".mp3") ? "audio/mpeg" : rel.endsWith(".png") ? "image/png" : "application/json");
+      await storage.uploadFromFile(prefix + rel, local, rel.endsWith(".mp3") ? "audio/mpeg" : rel.endsWith(".png") ? "image/png" : rel.endsWith(".mp4") ? "video/mp4" : "application/json");
     }
   }
 }
 
-export async function syncCacheDown(env: JobEnv, ownerId: string, courseId: string, courseDir: string): Promise<number> {
+export async function syncCacheDown(env: JobEnv, ownerId: string, courseId: string, courseDir: string, only?: string[]): Promise<number> {
   const { storage } = env.ctx;
   const prefix = courseKeys(ownerId, courseId).cache;
   let restored = 0;
   for (const o of await storage.list(prefix)) {
     const rel = o.key.slice(prefix.length);
+    if (only && !only.some((d) => rel.startsWith(`${d}/`))) continue;
     const local = path.join(courseDir, ...rel.split("/"));
     const st = await fs.stat(local).catch(() => null);
     if (!st || (st.size !== o.size && rel !== "checkpoint.json")) {
@@ -225,7 +280,10 @@ export async function runChild(
 
 export const TRANSIENT = /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|\b429\b|\b50[0234]\b|rate limit|network/i;
 
-export async function runBuild(job: WorkerJob, env: JobEnv): Promise<void> {
+export async function runBuild(job: WorkerJob, parentEnv: JobEnv): Promise<void> {
+  // "Generate Video" = narrated video, then the animated enhanced video, in one job with one progress bar.
+  const chain = job.payload?.animate !== false;
+  const env: JobEnv = chain ? { ...parentEnv, progress: (p, l) => parentEnv.progress({ ...p, percent: Math.round(((p as { percent?: number }).percent ?? 0) * 0.55) }, l) } : parentEnv;
   const { ctx } = env;
   const course = await loadCourse(ctx, job.course_id);
   if (!course.pptx_key) throw new PermanentJobError("The presentation is missing.");
@@ -302,13 +360,26 @@ export async function runBuild(job: WorkerJob, env: JobEnv): Promise<void> {
     [course.id, JSON.stringify(outputs), duration, startHash],
   );
   // Drop bulky, re-creatable files; audio/slide caches stay for the next edit.
-  await Promise.all(["video-segments", "source"].map((d) => fs.rm(path.join(courseDir, d), { recursive: true, force: true })));
+  await fs.rm(path.join(courseDir, "source"), { recursive: true, force: true });
   await fs.rm(sources.video, { force: true });
-  await env.progress({ ...tracker.snapshot(), percent: 100, detail: "Complete" });
+  await env.progress({ ...tracker.snapshot(), percent: 100, detail: "Narrated video complete" });
+
+  if (chain) {
+    const animEnv: JobEnv = { ...parentEnv, progress: (p, l) => parentEnv.progress({ ...p, percent: 55 + Math.round(((p as { percent?: number }).percent ?? 0) * 0.45) }, l) };
+    try {
+      await runAnimate(job, animEnv);
+    } catch (err) {
+      if (err instanceof CancelledError) throw err;
+      // The narrated video is already safe in storage; say what happened with the animation step.
+      const message = err instanceof Error ? err.message : String(err);
+      await ctx.db.query("UPDATE courses SET status = 'complete', error = $2, updated_at = now() WHERE id = $1", [course.id, `The narrated video is ready, but the animation step failed: ${message.split("\n").slice(0, 3).join(" ").slice(0, 600)}`]);
+    }
+  }
 }
 
 /** Mark the course after a job ended without success. */
 export async function settleCourseAfterFailure(ctx: Ctx, job: WorkerJob, outcome: "failed" | "cancelled" | "requeued", message: string): Promise<void> {
+  if (job.kind === "preview" || job.kind === "plan") return;
   if (outcome === "requeued") {
     await ctx.db.query("UPDATE courses SET status = $2, error = $3, updated_at = now() WHERE id = $1", [job.course_id, job.kind === "parse" ? "parsing" : job.kind === "animate" ? "rendering" : "queued", message]);
     return;

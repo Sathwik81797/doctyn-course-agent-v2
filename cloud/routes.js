@@ -6,8 +6,8 @@ import path from "node:path";
 import {
   HttpError, audit, clearCookie, login, logout, publicUser, register, sessionCookie, sessionTokenFromCookie, userForToken,
 } from "./auth.js";
-import { enqueue, requestCancel, retryJob } from "./queue.js";
-import { ANIMATION_TEMPLATES, OUTPUT_FILES, UUID_RE, cleanText, contentHash, courseKeys } from "./util.js";
+import { engineStatus, enqueue, reapStale, requestCancel, retryJob } from "./queue.js";
+import { ANIMATION_TEMPLATES, OUTPUT_FILES, UUID_RE, cleanText, contentHash, courseKeys, narrationHash, parseSlideList } from "./util.js";
 
 /** @typedef {{ config: import("./config.js").CloudConfig, db: import("./db.js").Db, storage: import("./storage.js").Storage }} Ctx */
 /** @typedef {import("node:http").IncomingMessage} Req */
@@ -83,8 +83,10 @@ export function toCourse(r, detail = false) {
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     completedAt: r.completed_at,
-    animation: r.animation ? { builtAt: r.animation.builtAt, draft: r.animation.draft, slideCount: r.animation.slides?.length ?? 0 } : null,
-    ...(detail ? { slides: r.slides, validation: r.validation, animationPlan: r.animation?.slides ?? null, animationEdits: r.animation_edits ?? {} } : {}),
+    animation: r.animation ? { planned: true, rendered: Boolean(r.animation.rendered), draft: r.animation.draft ?? null, slideCount: r.animation.slides?.length ?? 0 } : null,
+    animatedDraft: outputs.animated ? Boolean(outputs.animated.draft) : null,
+    slidePreviews: Boolean(r.slide_previews),
+    ...(detail ? { previews: Object.fromEntries(Object.entries(r.previews ?? {}).map(([n, p]) => [n, { at: p.at, stale: p.hash !== narrationHash(String(r.slides.find((/** @type {any} */ x) => x.slide === Number(n))?.narration ?? "")) }])), slides: r.slides, validation: r.validation, animationPlan: r.animation?.slides ?? null, animationEdits: r.animation_edits ?? {} } : {}),
     ...(r.job ? { job: toJob(r.job) } : {}),
   };
 }
@@ -137,8 +139,14 @@ route("GET", "/health", "none", async (ctx, { res }) => {
   sendJson(res, 200, { ok: true, service: "doctyn-cloud", db: ctx.db.kind, storage: ctx.storage.driver, registration: ctx.config.registrationMode });
 });
 
+route("GET", "/engine", "user", async (ctx, { res }) => {
+  // If the PC went off mid-job, free the job so it resumes when the engine returns (the website polls this).
+  await reapStale(ctx.db, ctx.config.staleJobSeconds);
+  sendJson(res, 200, await engineStatus(ctx.db));
+});
+
 route("GET", "/meta", "none", async (ctx, { res }) => {
-  sendJson(res, 200, { registration: ctx.config.registrationMode, maxUploadBytes: ctx.config.maxUploadBytes, animationTemplates: ANIMATION_TEMPLATES });
+  sendJson(res, 200, { localMode: ctx.config.devAutoLogin, registration: ctx.config.registrationMode, maxUploadBytes: ctx.config.maxUploadBytes, animationTemplates: ANIMATION_TEMPLATES });
 });
 
 route("POST", "/auth/register", "none", async (ctx, { req, res }) => {
@@ -251,7 +259,8 @@ route("POST", "/courses/:id/files/complete", "user", async (ctx, { req, res, use
               updated_at = now() WHERE id = $1 RETURNING *`,
       [row.id, key, name, head.size, both ? "parsing" : "created"],
     );
-    if (oldKey) await ctx.storage.remove(oldKey).catch(() => {});
+    // The previous upload stays in storage (originals are preserved); it is removed with the course.
+    void oldKey;
     if (both) await q.query("INSERT INTO jobs(course_id, owner_id, kind, max_attempts) VALUES ($1,$2,'parse',$3)", [row.id, row.owner_id, ctx.config.jobMaxAttempts]);
     return res2.rows[0];
   });
@@ -299,7 +308,8 @@ route("PATCH", "/courses/:id", "user", async (ctx, { req, res, user, params }) =
   sendJson(res, 200, { course: toCourse(out, true) });
 });
 
-route("POST", "/courses/:id/build", "user", async (ctx, { res, user, params }) => {
+route("POST", "/courses/:id/build", "user", async (ctx, { req, res, user, params }) => {
+  const opts = /** @type {any} */ (await readJson(req, 4096));
   const row = await mine(ctx, user, params.id);
   if (!["parsed", "complete", "failed"].includes(row.status)) {
     throw new HttpError(409, row.status === "invalid" ? "Fix the problems found in the files before generating the video." : `This course cannot be built while it is ${row.status}.`);
@@ -308,7 +318,7 @@ route("POST", "/courses/:id/build", "user", async (ctx, { res, user, params }) =
   if (!slides.length || row.validation?.ok === false) throw new HttpError(409, "The presentation and voiceover script do not match yet.");
   const empty = slides.filter((/** @type {any} */ s) => !s.narration.trim()).map((/** @type {any} */ s) => s.slide);
   if (empty.length) throw new HttpError(409, `Slides without narration: ${empty.join(", ")}. Add narration before generating.`);
-  const job = await enqueue(ctx.db, { courseId: row.id, ownerId: row.owner_id, kind: "build", maxAttempts: ctx.config.jobMaxAttempts });
+  const job = await enqueue(ctx.db, { courseId: row.id, ownerId: row.owner_id, kind: "build", maxAttempts: ctx.config.jobMaxAttempts, payload: { animate: opts.animate !== false } });
   await ctx.db.query("UPDATE courses SET status = 'queued', error = NULL, updated_at = now() WHERE id = $1", [row.id]);
   await audit(ctx.db, user.id, "job.build", row.id, { job: job.id });
   sendJson(res, 202, { job: toJob(job) });
@@ -337,7 +347,7 @@ route("PATCH", "/courses/:id/animation", "user", async (ctx, { req, res, user, p
     if (BUSY.includes(row.status)) throw new HttpError(409, "This course is being processed. Edit animations when the job has finished.");
     const n = Number(body.slide);
     if (!row.slides.some((/** @type {any} */ s) => s.slide === n)) throw new HttpError(400, `Slide ${body.slide} does not exist.`);
-    const e = body.edit && typeof body.edit === "object" ? body.edit : null;
+    const e = body.edit && typeof body.edit === "object" ? body.edit : body.reset === true ? {} : null;
     if (!e) throw new HttpError(400, "edit is required.");
     /** @type {Record<string, unknown>} */
     const clean = {};
@@ -357,8 +367,17 @@ route("PATCH", "/courses/:id/animation", "user", async (ctx, { req, res, user, p
       if (!Array.isArray(e.popups) || e.popups.length > 20) throw new HttpError(400, "popups must be a list of up to 20 items.");
       clean.popups = e.popups;
     }
-    if (!Object.keys(clean).length) throw new HttpError(400, "Nothing to change.");
-    const edits = { ...(row.animation_edits ?? {}), [String(n)]: { ...(row.animation_edits?.[String(n)] ?? {}), ...clean } };
+    if (e.events !== undefined) {
+      if (!Array.isArray(e.events) || e.events.length > 80) throw new HttpError(400, "events must be a list of up to 80 timeline items.");
+      clean.events = e.events;
+    }
+    /** @type {Record<string, any>} */
+    const edits = { ...(row.animation_edits ?? {}) };
+    if (body.reset === true) delete edits[String(n)];
+    else {
+      if (!Object.keys(clean).length) throw new HttpError(400, "Nothing to change.");
+      edits[String(n)] = { ...(row.animation_edits?.[String(n)] ?? {}), ...clean };
+    }
     // AI-generated clinical content changed: any earlier approval no longer applies.
     const res2 = await q.query(
       "UPDATE courses SET animation_edits = $2::jsonb, review_status = 'none', published_at = NULL, updated_at = now() WHERE id = $1 RETURNING *",
@@ -368,6 +387,58 @@ route("PATCH", "/courses/:id/animation", "user", async (ctx, { req, res, user, p
     return res2.rows[0];
   });
   sendJson(res, 200, { course: toCourse(out, true) });
+});
+
+// ---------- slide images, voice previews, activity ----------
+
+route("POST", "/courses/:id/plan", "user", async (ctx, { res, user, params }) => {
+  const row = await mine(ctx, user, params.id);
+  if (!row.slides.length || BUSY.includes(row.status)) throw new HttpError(409, "This course is not ready for animation planning.");
+  if (row.slides.some((/** @type {any} */ s) => !s.narration.trim())) throw new HttpError(409, "Every slide needs narration before animations can be planned.");
+  const job = await enqueue(ctx.db, { courseId: row.id, ownerId: row.owner_id, kind: "plan", maxAttempts: ctx.config.jobMaxAttempts });
+  sendJson(res, 202, { job: toJob(job) });
+});
+
+route("GET", "/courses/:id/slides/:n/image", "user", async (ctx, { res, user, params }) => {
+  const row = await mine(ctx, user, params.id);
+  const n = Number(params.n);
+  if (!row.slide_previews || !Number.isInteger(n) || n < 1 || n > (row.slide_count ?? 0)) throw new HttpError(404, "No preview image for that slide.");
+  const url = await ctx.storage.presignGet(courseKeys(row.owner_id, row.id).slideImage(n), { contentType: "image/jpeg" });
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Location", url);
+  res.writeHead(302).end();
+});
+
+route("POST", "/courses/:id/preview", "user", async (ctx, { req, res, user, params }) => {
+  const row = await mine(ctx, user, params.id);
+  if (!row.slides.length || BUSY.includes(row.status)) throw new HttpError(409, "This course is not ready for a voice preview.");
+  const body = /** @type {any} */ (await readJson(req, 4096));
+  const slides = parseSlideList(String(body.slides ?? "1-3"), row.slide_count ?? row.slides.length);
+  if (!slides) throw new HttpError(400, `Invalid slide list "${body.slides}". Use e.g. 1-3 or 1,12 (slides 1 to ${row.slide_count}).`);
+  if (slides.length > 10) throw new HttpError(400, "Preview up to 10 slides at a time.");
+  const empty = slides.filter((n) => !row.slides.find((/** @type {any} */ s) => s.slide === n)?.narration.trim());
+  if (empty.length) throw new HttpError(409, `Slides without narration: ${empty.join(", ")}.`);
+  const job = await enqueue(ctx.db, { courseId: row.id, ownerId: row.owner_id, kind: "preview", maxAttempts: ctx.config.jobMaxAttempts, payload: { slides } });
+  sendJson(res, 202, { job: toJob(job) });
+});
+
+route("GET", "/courses/:id/previews/:n", "user", async (ctx, { res, user, params }) => {
+  const row = await mine(ctx, user, params.id);
+  const n = Number(params.n);
+  if (!row.previews?.[String(n)]) throw new HttpError(404, "No voice preview for that slide yet.");
+  const url = await ctx.storage.presignGet(courseKeys(row.owner_id, row.id).voicePreview(n), { contentType: "audio/mpeg" });
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Location", url);
+  res.writeHead(302).end();
+});
+
+route("GET", "/activity", "user", async (ctx, { res, user }) => {
+  const rows = (await ctx.db.query(
+    `SELECT j.*, c.title AS course_title FROM jobs j JOIN courses c ON c.id = j.course_id
+      WHERE j.owner_id = $1 AND c.deleted_at IS NULL ORDER BY j.created_at DESC LIMIT 25`,
+    [user.id],
+  )).rows;
+  sendJson(res, 200, { activity: rows.map((j) => toJob(j)) });
 });
 
 // ---------- clinical review & publication ----------
@@ -407,6 +478,8 @@ route("POST", "/courses/:id/review", "user", async (ctx, { req, res, user, param
   const notes = cleanText(body.notes, 4000).trim();
   if (decision === "rejected" && !notes) throw new HttpError(400, "Explain what needs to change when rejecting.");
   if (!UUID_RE.test(params.id)) throw new HttpError(404, "Course not found.");
+  const owner = (await ctx.db.query("SELECT owner_id FROM courses WHERE id = $1", [params.id])).rows[0]?.owner_id;
+  if (owner === user.id && !ctx.config.allowSelfReview) throw new HttpError(403, "A different medical reviewer must review your own course.");
   const out = await ctx.db.query(
     `UPDATE courses SET review_status = $2, review_by = $3, review_notes = $4, reviewed_at = now(), updated_at = now()
       WHERE id = $1 AND review_status = 'pending' AND review_hash = content_hash AND deleted_at IS NULL RETURNING id`,

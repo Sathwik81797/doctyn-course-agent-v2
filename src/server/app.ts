@@ -15,6 +15,8 @@ export interface DashboardOptions {
   inputDir: string;
   outputDir: string;
   publicDir: string;
+  /** File served at / (relative to publicDir). The local-engine page lives in legacy/. */
+  indexFile?: string;
   /** Exact origins, or patterns with * standing for one DNS label fragment ([a-z0-9-]+). */
   allowedOrigins: string[];
   tts: { provider: string; voice: string; speed: number };
@@ -250,7 +252,7 @@ export async function createDashboardServer(opts: DashboardOptions): Promise<{ s
 
   async function staticFile(req: http.IncomingMessage, res: http.ServerResponse, p: string[]): Promise<void> {
     if (p.some((s) => s.startsWith(".") || s.includes("\\"))) throw new HttpError(404, "Not found.");
-    const file = path.resolve(opts.publicDir, ...(p.length ? p : ["index.html"]));
+    const file = path.resolve(opts.publicDir, ...(p.length ? p : (opts.indexFile ?? "index.html").split("/")));
     if (!file.startsWith(path.resolve(opts.publicDir) + path.sep)) throw new HttpError(404, "Not found.");
     await sendFile(req, res, file, null);
   }

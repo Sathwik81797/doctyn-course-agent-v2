@@ -1,10 +1,14 @@
 import os from "node:os";
-import { claim, markCancelled, markFailed, markSucceeded, reapStale } from "../../cloud/queue.js";
+import { claim, markCancelled, markFailed, markSucceeded, reapStale, workerGone, workerSeen } from "../../cloud/queue.js";
 import type { Ctx } from "../../cloud/routes.js";
 import { runAnimate } from "./animate-job.js";
+import { runPlan } from "./plan.js";
+import { runPreview } from "./preview-job.js";
 import { CancelledError, PermanentJobError, runBuild, runParse, sendHeartbeat, settleCourseAfterFailure, type JobEnv, type WorkerJob } from "./jobs.js";
 
 export interface WorkerOptions {
+  /** Shown on the website (e.g. the TTS voice engine in use). */
+  info?: object;
   workRoot: string;
   workerId?: string;
   pollMs?: number;
@@ -24,6 +28,7 @@ export async function processOne(ctx: Ctx, opts: Required<Pick<WorkerOptions, "w
   const job = (await claim(ctx.db, opts.workerId)) as (WorkerJob & Record<string, unknown>) | null;
   if (!job) return false;
   log(`job ${job.id} (${job.kind}, attempt ${job.attempt}/${job.max_attempts}) started`);
+  busyJob = job.id;
 
   const env: JobEnv = {
     ctx,
@@ -34,6 +39,8 @@ export async function processOne(ctx: Ctx, opts: Required<Pick<WorkerOptions, "w
   try {
     if (job.kind === "parse") await runParse(job, env);
     else if (job.kind === "animate") await runAnimate(job, env);
+    else if (job.kind === "plan") await runPlan(job, env);
+    else if (job.kind === "preview") await runPreview(job, env);
     else await runBuild(job, env);
     await markSucceeded(ctx.db, job.id, opts.workerId);
     log(`job ${job.id} succeeded`);
@@ -48,15 +55,23 @@ export async function processOne(ctx: Ctx, opts: Required<Pick<WorkerOptions, "w
       await settleCourseAfterFailure(ctx, job, outcome, message);
       log(`job ${job.id} ${outcome}: ${message.split("\n")[0]}`);
     }
+  } finally {
+    busyJob = null;
   }
   return true;
 }
+
+let busyJob: string | null = null;
 
 export async function runWorker(ctx: Ctx, opts: WorkerOptions): Promise<void> {
   const workerId = opts.workerId ?? `${os.hostname()}-${process.pid}`;
   const pollMs = opts.pollMs ?? 3000;
   const log = opts.log ?? ((m: string) => console.log(`[worker ${workerId}] ${m}`));
   let lastReap = 0;
+  const host = os.hostname();
+  const beat = (currentJob: string | null) => workerSeen(ctx.db, { id: workerId, hostname: host, currentJob, info: opts.info ?? {} }).catch(() => {});
+  await beat(null);
+  const presence = setInterval(() => void beat(busyJob), 10_000);
   log("started; waiting for jobs");
   while (!opts.signal?.aborted) {
     try {
@@ -72,5 +87,7 @@ export async function runWorker(ctx: Ctx, opts: WorkerOptions): Promise<void> {
       await sleep(pollMs * 2, opts.signal);
     }
   }
+  clearInterval(presence);
+  await workerGone(ctx.db, workerId).catch(() => {});
   log("stopped");
 }

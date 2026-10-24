@@ -5,9 +5,12 @@ import { HttpError } from "./auth.js";
 
 export const ACTIVE = ["queued", "running"];
 
+/** Course status to fall back to when a job of this kind is cancelled. null = the job never changed it. @param {string} kind */
+export const restingStatus = (kind) => (kind === "parse" ? "uploaded" : kind === "animate" ? "complete" : kind === "preview" || kind === "plan" ? null : "parsed");
+
 /**
  * @param {import("./db.js").Db} db
- * @param {{ courseId: string, ownerId: string, kind: "parse" | "build" | "animate", maxAttempts: number, payload?: object }} j
+ * @param {{ courseId: string, ownerId: string, kind: "parse" | "build" | "animate" | "preview" | "plan", maxAttempts: number, payload?: object }} j
  */
 export async function enqueue(db, j) {
   return db.tx(async (q) => {
@@ -99,7 +102,7 @@ export async function requestCancel(db, jobId, canTouch) {
     if (!job || !canTouch(job)) throw new HttpError(404, "Job not found.");
     if (job.status === "queued") {
       await q.query("UPDATE jobs SET status = 'cancelled', finished_at = now(), error = 'Cancelled before it started.' WHERE id = $1", [jobId]);
-      await q.query("UPDATE courses SET status = $2, updated_at = now() WHERE id = $1", [job.course_id, job.kind === "parse" ? "uploaded" : job.kind === "animate" ? "complete" : "parsed"]);
+      if (restingStatus(job.kind)) await q.query("UPDATE courses SET status = $2, updated_at = now() WHERE id = $1", [job.course_id, restingStatus(job.kind)]);
       return "cancelled";
     }
     if (job.status === "running") {
@@ -123,7 +126,7 @@ export async function retryJob(db, jobId, canTouch) {
               run_after = now(), finished_at = NULL, log_tail = '' WHERE id = $1 RETURNING *`,
       [jobId],
     );
-    await q.query("UPDATE courses SET status = $2, error = NULL, updated_at = now() WHERE id = $1", [job.course_id, job.kind === "parse" ? "parsing" : job.kind === "animate" ? "rendering" : "queued"]);
+    if (job.kind !== "preview" && job.kind !== "plan") await q.query("UPDATE courses SET status = $2, error = NULL, updated_at = now() WHERE id = $1", [job.course_id, job.kind === "parse" ? "parsing" : job.kind === "animate" ? "rendering" : "queued"]);
     return res.rows[0];
   });
 }
@@ -143,7 +146,7 @@ export async function reapStale(db, staleSeconds) {
     for (const job of stale) {
       if (job.cancel_requested) {
         await q.query("UPDATE jobs SET status = 'cancelled', finished_at = now(), error = 'Cancelled.' WHERE id = $1", [job.id]);
-        await q.query("UPDATE courses SET status = $2, updated_at = now() WHERE id = $1", [job.course_id, job.kind === "parse" ? "uploaded" : job.kind === "animate" ? "complete" : "parsed"]);
+        if (restingStatus(job.kind)) await q.query("UPDATE courses SET status = $2, updated_at = now() WHERE id = $1", [job.course_id, restingStatus(job.kind)]);
       } else if (job.attempt < job.max_attempts) {
         await q.query(
           "UPDATE jobs SET status = 'queued', locked_by = NULL, error = 'The worker stopped responding; the job was queued again.', run_after = now() WHERE id = $1",
@@ -151,9 +154,41 @@ export async function reapStale(db, staleSeconds) {
         );
       } else {
         await q.query("UPDATE jobs SET status = 'failed', finished_at = now(), error = 'The worker stopped responding and no attempts are left.' WHERE id = $1", [job.id]);
-        await q.query("UPDATE courses SET status = 'failed', error = 'The worker stopped responding and no attempts are left.', updated_at = now() WHERE id = $1", [job.course_id]);
+        if (job.kind !== "preview" && job.kind !== "plan") await q.query("UPDATE courses SET status = CASE WHEN $2 = 'animate' THEN 'complete' ELSE 'failed' END, error = 'The worker stopped responding and no attempts are left.', updated_at = now() WHERE id = $1", [job.course_id, job.kind]);
       }
     }
     return stale.length;
   });
+}
+
+/** The render engine (worker) announces itself; the website shows whether it is online. */
+export const ENGINE_ONLINE_SECONDS = 30;
+
+/**
+ * @param {import("./db.js").Queryable} db
+ * @param {{ id: string, hostname: string, currentJob?: string | null, info?: object }} w
+ */
+export async function workerSeen(db, w) {
+  await db.query(
+    `INSERT INTO workers(id, hostname, current_job, info) VALUES ($1,$2,$3,$4::jsonb)
+     ON CONFLICT (id) DO UPDATE SET last_seen = now(), hostname = EXCLUDED.hostname, current_job = EXCLUDED.current_job, info = EXCLUDED.info`,
+    [w.id, w.hostname, w.currentJob ?? null, JSON.stringify(w.info ?? {})],
+  );
+  await db.query("DELETE FROM workers WHERE last_seen < now() - interval '7 days'");
+}
+
+/** @param {import("./db.js").Queryable} db */
+export async function workerGone(db, /** @type {string} */ id) {
+  await db.query("DELETE FROM workers WHERE id = $1", [id]);
+}
+
+/** @param {import("./db.js").Queryable} db */
+export async function engineStatus(db) {
+  const w = (await db.query(
+    `SELECT count(*)::int AS online, count(*) FILTER (WHERE current_job IS NOT NULL)::int AS busy, max(info->>'tts') AS tts
+       FROM workers WHERE last_seen > now() - ($1 || ' seconds')::interval`,
+    [String(ENGINE_ONLINE_SECONDS)],
+  )).rows[0];
+  const j = (await db.query("SELECT count(*) FILTER (WHERE status = 'queued')::int AS queued, count(*) FILTER (WHERE status = 'running')::int AS running FROM jobs")).rows[0];
+  return { online: w.online > 0, workers: w.online, busy: w.busy, tts: w.tts ?? null, queued: j.queued, running: j.running };
 }

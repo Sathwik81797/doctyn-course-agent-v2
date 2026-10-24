@@ -22,6 +22,8 @@ export function courseKeys(ownerId, courseId) {
     source: (/** @type {"pptx" | "docx"} */ type, /** @type {string} */ nonce) => `${base}/source/${type}-${nonce}.${type}`,
     output: (/** @type {string} */ name) => `${base}/output/${name}`,
     cache: `${base}/cache/`,
+    slideImage: (/** @type {number} */ n) => `${base}/preview/slides/slide-${String(n).padStart(3, "0")}.jpg`,
+    voicePreview: (/** @type {number} */ n) => `${base}/preview/voice/slide-${String(n).padStart(3, "0")}.mp3`,
   };
 }
 
@@ -33,6 +35,26 @@ export const OUTPUT_FILES = /** @type {const} */ ({
   transcript: { name: "transcript.txt", type: "text/plain; charset=utf-8" },
   animated: { name: "animated-video.mp4", type: "video/mp4" },
 });
+
+/** Fingerprint of one slide's narration (used to tell whether a voice preview is still current). @param {string} text */
+export function narrationHash(text) {
+  return createHash("sha256").update(text.trim()).digest("hex").slice(0, 16);
+}
+
+/** "1-3,7" -> [1,2,3,7] or null when malformed. @param {string} text @param {number} max */
+export function parseSlideList(text, max) {
+  const t = text.replace(/\s+/g, "");
+  if (!/^\d+(-\d+)?(,\d+(-\d+)?)*$/.test(t) || t.length > 80) return null;
+  const out = new Set();
+  for (const part of t.split(",")) {
+    const [a, b] = part.split("-").map(Number);
+    for (let n = /** @type {number} */ (a); n <= /** @type {number} */ (b ?? a); n++) {
+      if (n < 1 || n > max) return null;
+      out.add(n);
+    }
+  }
+  return [...out].sort((x, y) => x - y);
+}
 
 /** @param {unknown} v @param {number} max */
 export function cleanText(v, max) {

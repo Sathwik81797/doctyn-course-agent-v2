@@ -1,6 +1,7 @@
 // @ts-check
 // One tiny query interface over node-postgres (production) and PGlite (an in-process
 // real Postgres used for local development and automated tests only).
+import fs from "node:fs";
 import path from "node:path";
 
 /**
@@ -104,6 +105,26 @@ export const MIGRATIONS = [
   ALTER TABLE courses ADD COLUMN animation jsonb;
   ALTER TABLE courses ADD COLUMN animation_edits jsonb NOT NULL DEFAULT '{}'::jsonb;
   `,
+  `
+  CREATE TABLE workers (
+    id text PRIMARY KEY,
+    hostname text NOT NULL,
+    started_at timestamptz NOT NULL DEFAULT now(),
+    last_seen timestamptz NOT NULL DEFAULT now(),
+    current_job uuid,
+    info jsonb NOT NULL DEFAULT '{}'::jsonb
+  );
+  `,
+  `
+  ALTER TABLE jobs DROP CONSTRAINT jobs_kind_check;
+  ALTER TABLE jobs ADD CONSTRAINT jobs_kind_check CHECK (kind IN ('parse','build','animate','preview','plan'));
+  ALTER TABLE courses ADD COLUMN slide_previews boolean NOT NULL DEFAULT false;
+  ALTER TABLE courses ADD COLUMN previews jsonb NOT NULL DEFAULT '{}'::jsonb;
+  `,
+  `
+  ALTER TABLE courses ADD COLUMN import_key text;
+  CREATE UNIQUE INDEX courses_import_key ON courses(owner_id, import_key) WHERE import_key IS NOT NULL;
+  `,
 ];
 
 /** @param {Queryable} q */
@@ -157,6 +178,7 @@ export async function createDb(config) {
     if (config.production) throw new Error("DATABASE_URL is required in production. PGlite is for local development only.");
     const { PGlite } = await import("@electric-sql/pglite");
     const dir = config.localDbDir;
+    if (dir !== "memory://") fs.mkdirSync(path.dirname(path.resolve(dir)), { recursive: true });
     const lite = dir === "memory://" ? new PGlite() : new PGlite(path.resolve(dir));
     await lite.waitReady;
     /** @param {{ query: (t: string, p?: any[]) => Promise<any>, exec: (t: string) => Promise<any> }} c @returns {Queryable} */

@@ -112,19 +112,44 @@ export async function login(db, config, input) {
   if (user.status === "pending") throw new HttpError(403, "Your account is waiting for administrator approval.");
   if (user.status === "disabled") throw new HttpError(403, "This account has been disabled. Contact an administrator.");
 
-  const token = randomBytes(32).toString("base64url");
-  const expires = new Date(Date.now() + config.sessionDays * 86400_000);
-  await db.query("INSERT INTO sessions(user_id, token_hash, expires_at, user_agent) VALUES ($1,$2,$3,$4)", [
-    user.id,
-    hashToken(token),
-    expires.toISOString(),
-    (input.userAgent ?? "").slice(0, 300),
-  ]);
-  await db.query("UPDATE users SET last_login_at = now() WHERE id = $1", [user.id]);
+  const { token, expires } = await createSession(db, config, user.id, input.userAgent ?? "");
   await db.query("DELETE FROM sessions WHERE expires_at < now()");
   await db.query("DELETE FROM login_attempts WHERE at < now() - interval '1 day'");
   await audit(db, user.id, "user.login", user.id, {});
   return { user: publicUser(user), token, expires };
+}
+
+/**
+ * @param {import("./db.js").Queryable} db
+ * @param {import("./config.js").CloudConfig} config
+ * @param {string} userId @param {string} [userAgent]
+ */
+export async function createSession(db, config, userId, userAgent = "") {
+  const token = randomBytes(32).toString("base64url");
+  const expires = new Date(Date.now() + config.sessionDays * 86400_000);
+  await db.query("INSERT INTO sessions(user_id, token_hash, expires_at, user_agent) VALUES ($1,$2,$3,$4)", [
+    userId,
+    hashToken(token),
+    expires.toISOString(),
+    userAgent.slice(0, 300),
+  ]);
+  await db.query("UPDATE users SET last_login_at = now() WHERE id = $1", [userId]);
+  return { token, expires };
+}
+
+/**
+ * Development convenience only (never used in production): the single local user of `npm run cloud:dev`.
+ * @param {import("./db.js").Queryable} db
+ */
+export async function ensureLocalUser(db) {
+  const email = "local@doctyn.local";
+  const found = await db.query("SELECT id FROM users WHERE email = $1", [email]);
+  if (found.rows[0]) return /** @type {string} */ (found.rows[0].id);
+  const res = await db.query(
+    "INSERT INTO users(email, name, password_hash, role, status) VALUES ($1,'Local user',$2,'admin','active') RETURNING id",
+    [email, await hashPassword(randomBytes(24).toString("hex"))],
+  );
+  return /** @type {string} */ (res.rows[0].id);
 }
 
 /** @param {import("./db.js").Queryable} db @param {string} token */

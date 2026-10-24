@@ -391,5 +391,7 @@ npm run animate -- verify                     # duration, audio per slide, 1920x
 
 ## Cloud platform (multi-user)
 
-A hosted, multi-user version (accounts, private workspaces, background rendering, medical review, admin) lives alongside the local tool.
-See [docs/CLOUD.md](docs/CLOUD.md). Try it locally with `npm run cloud:dev`.
+The dashboard is one page (`public/`): upload, validate, edit slides/narration/animations, generate, review and watch.
+See [docs/CLOUD.md](docs/CLOUD.md). Run it locally with `npm run cloud:dev` (http://127.0.0.1:8790/).
+The previous local-engine page is kept, unlinked, at `public/legacy/` and still served by `npm run dashboard`.
+Rendering on your own Windows PC instead of a cloud server: see [docs/ENGINE.md](docs/ENGINE.md) (`npm run engine`).

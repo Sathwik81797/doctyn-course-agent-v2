@@ -13,8 +13,10 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.studio.json",
     "test": "node --import tsx --test \"test/*.test.ts\"",
     "cloud:dev": "tsx src/cloud-dev.ts",
+    "cloud:import-course": "tsx src/cloud-import.ts",
     "cloud:create-admin": "node cloud/admin-cli.js",
     "worker": "tsx src/worker/index.ts",
+    "engine": "tsx src/worker/index.ts",
     "cloud:e2e": "tsx src/cloud-e2e.ts"
   },
   "keywords": [],
@@ -42,9 +44,11 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.11",
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^26.6.5",
     "@types/pg": "^8.23.1",
     "esbuild": "^0.28.2",
+    "jsdom": "^29.1.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },

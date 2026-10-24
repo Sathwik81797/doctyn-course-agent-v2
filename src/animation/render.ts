@@ -9,7 +9,7 @@ import path from "node:path";
 import sharp from "sharp";
 import type { Config } from "../utils/config.js";
 import { PipelineError } from "../utils/errors.js";
-import { ensureDir, exists, pad3, writeFileAtomic } from "../utils/files.js";
+import { ensureDir, exists, pad3, sha256File, writeFileAtomic } from "../utils/files.js";
 import { requireTool } from "../utils/tools.js";
 import { contentHash } from "./analyzer.js";
 import { H, renderFrame, W } from "./scene/core.js";
@@ -85,7 +85,7 @@ export async function renderSlideSegment(opts: {
   const { slide, settings, config } = opts;
   const audio = path.join(opts.courseRoot, "audio", `slide-${pad3(slide.slide)}.mp3`);
   const useAudio = slide.durationSource === "audio" && !slide.audioStale && (await exists(audio));
-  const audioStamp = useAudio ? String((await fs.stat(audio)).mtimeMs) : "silent";
+  const audioStamp = useAudio ? await sha256File(audio) : "silent";
   const watermark = isApproved(slide) ? "" : DRAFT_WATERMARK;
   const key = segmentKey(slide, settings, audioStamp, watermark);
   const keyFile = `${opts.out}.key`;
