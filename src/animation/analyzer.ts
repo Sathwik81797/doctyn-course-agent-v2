@@ -10,8 +10,9 @@ import { createHash } from "node:crypto";
 import { DRUG_TERMS, GLOSSARY } from "./glossary.js";
 import { authoredFor, TEMPLATE_ASSUMPTIONS } from "./scene/content.js";
 import { elementSpecs, type ElementSpec, type SceneInput } from "./scene/core.js";
+import { DERIVABLE, deriveFor, deriveScene, type Derived } from "./scene/derive.js";
 import { findPhrase, LEAD_IN, TAIL, wordTimings, type WordTiming } from "./scene/timing.js";
-import type { ClinicalFlag, Popup, SlidePlan, TemplateId, TimelineEvent } from "./types.js";
+import type { Analysis, ClinicalFlag, Popup, SlidePlan, TemplateId, TimelineEvent } from "./types.js";
 
 export interface SlideSource {
   slide: number;
@@ -167,7 +168,7 @@ export function buildEvents(plan: SceneInput, words: WordTiming[]): TimelineEven
 const round = (n: number): number => Math.round(n * 100) / 100;
 
 const NUMERIC_CLAIM =
-  /\b\d+(?:\.\d+)?(?:\s*(?:to|-|–)\s*\d+(?:\.\d+)?)?\s*(?:percent|%|mg\/dl|mmol\/l|kg\/m|kilograms|centimetres?|milligrams?|years?|micro-international|units?)\b/gi;
+  /\b\d+(?:\.\d+)?(?:\s*(?:to|-|–)\s*\d+(?:\.\d+)?)?\s*(?:percent|%|mg\/dl|mmol\/l|kg\/m|kilograms|centimetres?|milligrams?|years?|micro-international|units?|hours?|hrs?|minutes?|mins?|days?|weeks?|months?|ng\/l|ng\/ml|pg\/ml|mmhg|bpm|mmol|[µu]mol|g\/dl|iu|mg|mcg|ml)\b/gi;
 
 /** Split on sentence-ending punctuation followed by whitespace, so decimals such as "6.0" stay intact. */
 export function sentences(text: string): string[] {
@@ -227,7 +228,7 @@ export function buildPopups(src: SlideSource, words: WordTiming[]): Popup[] {
 const flagId = (kind: string, text: string): string => `flag-${createHash("sha1").update(`${kind}|${text}`).digest("hex").slice(0, 8)}`;
 
 /** Things a clinician must look at before the slide can be approved. */
-export function buildFlags(src: SlideSource, template: TemplateId, popups: Popup[]): ClinicalFlag[] {
+export function buildFlags(src: SlideSource, template: TemplateId, popups: Popup[], derived?: Pick<Derived, "assumptions">): ClinicalFlag[] {
   const flags: ClinicalFlag[] = [];
   const add = (kind: ClinicalFlag["kind"], text: string): void => {
     const id = flagId(kind, text);
@@ -243,15 +244,22 @@ export function buildFlags(src: SlideSource, template: TemplateId, popups: Popup
     if (generic) add("template-assumption", generic);
     for (const f of authored.flags ?? []) add("template-assumption", f);
   }
+  if (derived) {
+    for (const text of derived.assumptions) add("template-assumption", text);
+    add("template-assumption", "On-screen labels were selected automatically from this slide's text and narration (shortened at clause boundaries). Check each label, its order and its wording against the source before approving.");
+  }
   if (template === "continuum") add("template-assumption", "Continuum curves and laboratory tags are illustrative template content, not data from the source.");
   if (template === "glucose-uptake" && !/glut-?4/i.test(src.narration)) add("template-assumption", "Receptor → GLUT4 → glucose-entry mechanism is standard physiology added by the template; the narration does not describe it.");
   if (template === "visceral-fat") add("template-assumption", "The cytokine → blocked insulin-signalling step is drawn as a general mechanism for this slide.");
   return flags;
 }
 
-export function contentHash(p: Pick<SlidePlan, "narration" | "template" | "params" | "labels" | "events" | "popups" | "slideText">): string {
+export function contentHash(p: Pick<SlidePlan, "narration" | "template" | "params" | "labels" | "events" | "popups" | "slideText"> & { items?: SlidePlan["items"] }): string {
+  const parts: unknown[] = [p.narration, p.template, p.params, p.labels, p.events, p.popups, p.slideText];
+  // Derived scene items are part of what a reviewer approved; authored scenes (no items) hash exactly as before.
+  if (p.items?.length) parts.push(p.items);
   return createHash("sha256")
-    .update(JSON.stringify([p.narration, p.template, p.params, p.labels, p.events, p.popups, p.slideText]))
+    .update(JSON.stringify(parts))
     .digest("hex")
     .slice(0, 16);
 }
@@ -262,10 +270,46 @@ export interface AnalysisOverride {
   params?: SlidePlan["params"];
   extraPopups?: Popup[];
   analyzer?: "rules" | "ai";
+  /** What the AI understood about the slide (shown to the reviewer; never used to place anything on screen). */
+  analysis?: Partial<Analysis>;
+}
+
+interface SceneChoice {
+  template: TemplateId;
+  rationale: string;
+  derived?: Derived | undefined;
+  analyzer: "rules" | "ai";
+}
+
+/**
+ * Which scene a slide gets. Order: scene authored for this exact course > a strongly matching specialised mechanism >
+ * a reusable medical component filled from the slide's own words > the generic key-points cards (last resort).
+ * A template chosen by a person or by the AI is honoured when the slide can fill it; otherwise the deterministic choice stands.
+ */
+export function chooseScene(src: SlideSource, override: AnalysisOverride = {}): SceneChoice {
+  const analyzer = override.analyzer ?? "rules";
+  if (override.template) {
+    const authored = authoredFor(src.slide, src.title);
+    if (authored && authored.template === override.template) return { template: override.template, rationale: override.rationale ?? "Chosen by the reviewer.", analyzer };
+    if (DERIVABLE.includes(override.template)) {
+      const d = deriveFor(override.template, src, analyzer !== "ai");
+      if (d) return { template: override.template, rationale: override.rationale ?? "Chosen by the reviewer.", derived: d, analyzer };
+      if (analyzer === "ai") {
+        const fallback = chooseScene(src);
+        return { ...fallback, rationale: `The AI suggested "${override.template}" but this slide has too little matching text for it. ${fallback.rationale}` };
+      }
+    }
+    return { template: override.template, rationale: override.rationale ?? "Chosen by the reviewer.", analyzer };
+  }
+  const base = chooseTemplate(src);
+  if (base.template !== "key-points") return { ...base, analyzer };
+  const d = deriveScene(src);
+  if (d) return { template: d.template, rationale: d.rationale, derived: d, analyzer };
+  return { ...base, analyzer };
 }
 
 export function analyzeSlide(src: SlideSource, override: AnalysisOverride = {}): SlidePlan {
-  const choice = override.template ? { template: override.template, rationale: override.rationale ?? "Chosen by AI analysis." } : chooseTemplate(src);
+  const choice = chooseScene(src, override);
   const speech = Math.max(0.5, src.durationSeconds - LEAD_IN - TAIL);
   const words = wordTimings(src.narration, speech);
   const scene: SceneInput = {
@@ -274,7 +318,8 @@ export function analyzeSlide(src: SlideSource, override: AnalysisOverride = {}):
     narration: src.narration,
     slideText: src.slideText,
     template: choice.template,
-    params: { ...defaultParams(choice.template, src), ...override.params },
+    params: { ...defaultParams(choice.template, src), ...choice.derived?.params, ...override.params },
+    ...(choice.derived ? { items: choice.derived.items } : {}),
     labels: {},
     events: [],
     popups: [],
@@ -285,15 +330,26 @@ export function analyzeSlide(src: SlideSource, override: AnalysisOverride = {}):
   const plan: SlidePlan = {
     ...scene,
     rationale: choice.rationale,
-    analyzer: override.analyzer ?? "rules",
+    analyzer: choice.analyzer,
+    ...(choice.derived || override.analysis ? { analysis: mergeAnalysis(choice.derived?.analysis, override.analysis, src) } : {}),
     durationSource: src.durationSource,
     audioStale: false,
     events,
     popups,
-    flags: buildFlags(src, choice.template, popups),
+    flags: buildFlags(src, choice.template, popups, choice.derived),
     review: { status: "needs_review" },
   };
   return plan;
+}
+
+function mergeAnalysis(derived: Analysis | undefined, ai: Partial<Analysis> | undefined, src: SlideSource): Analysis {
+  const mechanism = ai?.mechanism ?? derived?.mechanism;
+  return {
+    category: ai?.category ?? derived?.category ?? "general",
+    topic: (ai?.topic ?? derived?.topic ?? src.title).slice(0, 200),
+    objective: (ai?.objective ?? derived?.objective ?? "").slice(0, 300),
+    ...(mechanism ? { mechanism: mechanism.slice(0, 300) } : {}),
+  };
 }
 
 /** Re-resolve cue-anchored events and pop-ups after narration or duration changes (keeps manual times for un-cued items). */

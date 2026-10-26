@@ -6,7 +6,7 @@ export const H = 1080;
 
 export type SceneInput = Pick<
   SlidePlan,
-  "slide" | "title" | "narration" | "slideText" | "template" | "params" | "labels" | "events" | "popups" | "durationSeconds"
+  "slide" | "title" | "narration" | "slideText" | "template" | "params" | "items" | "labels" | "events" | "popups" | "durationSeconds"
 >;
 
 export interface ElementSpec {

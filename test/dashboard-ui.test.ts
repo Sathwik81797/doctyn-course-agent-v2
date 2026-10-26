@@ -26,6 +26,7 @@ let win: any;
 let doc: Document;
 let courseId = "";
 let cookie = "";
+const requested: string[] = [];
 
 const slides = [
   { slide: 1, title: "Intro", narration: "Welcome to the module.", pptxTitle: "Intro", pptxText: ["Intro slide text"] },
@@ -91,7 +92,7 @@ before(async () => {
   win = dom.window;
   doc = win.document;
   win.fetch = (input: string, init: RequestInit = {}) =>
-    fetch(new URL(input, base), { ...init, redirect: "manual", headers: { ...(init.headers as Record<string, string>), cookie } });
+    (requested.push(String(input)), fetch(new URL(input, base), { ...init, redirect: "manual", headers: { ...(init.headers as Record<string, string>), cookie } }));
   win.confirm = () => true;
   win.HTMLElement.prototype.scrollIntoView = () => {};
   win.HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); };
@@ -123,28 +124,28 @@ describe("single dashboard (real app.js against the real API)", () => {
     assert.match(text, /Diabetes Course/);
     assert.match(text, /2 slides/);
     assert.match(text, /15m 16s/);
-    assert.match(card.querySelector(".thumb img")?.getAttribute("src") ?? "", /files\/thumbnail$/);
+    assert.match(card.querySelector(".thumb img")?.getAttribute("src") ?? "", /%2Ffiles%2Fthumbnail$/);
     assert.match(text, /Draft/);
     const chips = [...card.querySelectorAll(".version-chips .badge")].map((b) => b.textContent);
     assert.deepEqual(chips, ["Enhanced draft", "Original"]);
     const labels = [...card.querySelectorAll("button, a")].map((b) => b.textContent?.trim());
     for (const want of ["Play", "↓ Download MP4", "↓ Original MP4", "↓ VTT", "↓ SRT", "↓ Transcript", "Edit Again"]) assert.ok(labels.includes(want), `card has "${want}"`);
-    const href = (card.querySelector("a[href*='files/animated']") as HTMLAnchorElement).getAttribute("href");
-    assert.match(href ?? "", /\/courses\/[^/]+\/files\/animated\?download=1$/);
+    const href = (card.querySelector("a[href*='files%2Fanimated']") as HTMLAnchorElement).getAttribute("href");
+    assert.match(href ?? "", /^\/api\/v3\/route\?p=courses%2F[^&]+%2Ffiles%2Fanimated&download=1$/);
   });
 
   it("plays inside the dashboard with a switch between the draft and the original", async () => {
     byText("#videos button", "Play")!.click();
     const dialog = $("#player") as HTMLDialogElement;
     assert.ok(dialog.hasAttribute("open"));
-    assert.match(($("#player-video") as HTMLVideoElement).getAttribute("src") ?? "", /files\/animated$/);
+    assert.match(($("#player-video") as HTMLVideoElement).getAttribute("src") ?? "", /%2Ffiles%2Fanimated$/);
     assert.match($("#player-title").textContent ?? "", /Enhanced draft/);
     assert.match($("#player-meta").textContent ?? "", /DRAFT: not clinically approved/);
-    assert.ok($("#player-video track[src$='files/vtt']"), "captions attached");
+    assert.ok($("#player-video track[src$='files%2Fvtt']"), "captions attached");
     const tabs = $$("#player-versions .tab");
     assert.deepEqual(tabs.map((t) => t.textContent), ["Enhanced draft", "Original (narrated slides)"]);
     tabs[1]!.click();
-    assert.match(($("#player-video") as HTMLVideoElement).getAttribute("src") ?? "", /files\/video$/);
+    assert.match(($("#player-video") as HTMLVideoElement).getAttribute("src") ?? "", /%2Ffiles%2Fvideo$/);
     $("#player-close").click();
     assert.ok(!dialog.hasAttribute("open"));
   });
@@ -230,5 +231,16 @@ describe("single dashboard (real app.js against the real API)", () => {
     const chips = $("#current-inputs").textContent ?? "";
     assert.match(chips, /My Deck\.pptx/);
     assert.match(chips, /My Script\.docx/);
+  });
+});
+
+describe("API URL shape (Vercel only routes single-segment paths under /api/v3/)", () => {
+  it("never requests a multi-segment API path, in fetches or in links, media and images", () => {
+    assert.ok(requested.length > 10, "the page made API requests");
+    const bad = (u: string) => /^\/api\/v3\/[^/?#]+\//.test(u);
+    assert.deepEqual(requested.filter(bad), []);
+    const attrs = [...doc.querySelectorAll("[src], [href]")].map((n) => n.getAttribute("src") ?? n.getAttribute("href") ?? "").filter((u) => u.startsWith("/api/v3"));
+    assert.ok(attrs.length > 0);
+    assert.deepEqual(attrs.filter(bad), []);
   });
 });

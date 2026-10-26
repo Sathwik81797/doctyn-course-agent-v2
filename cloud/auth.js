@@ -199,3 +199,46 @@ export function clearCookie(secure) {
 export async function audit(db, userId, action, target, meta) {
   await db.query("INSERT INTO audit_log(user_id, action, target, meta) VALUES ($1,$2,$3,$4::jsonb)", [userId, action, target, JSON.stringify(meta)]);
 }
+
+/**
+ * JSON request body, in any Node server. Plain Node leaves the body in the request stream; the Vercel Node runtime
+ * has ALREADY consumed the stream and put the parsed body in req.body (verified with vercel dev: readableEnded=true,
+ * 0 bytes streamed). Reading only the stream there yields an empty body, so every sign-in would fail.
+ * @param {import("node:http").IncomingMessage} req @param {number} max
+ * @returns {Promise<Record<string, any>>}
+ */
+export async function readJsonBody(req, max) {
+  const pre = /** @type {any} */ (req).body;
+  if (pre !== undefined && pre !== null && (req.readableEnded || req.readable === false)) {
+    if (Buffer.isBuffer(pre) || typeof pre === "string") {
+      const text = Buffer.isBuffer(pre) ? pre.toString("utf8") : pre;
+      if (text.length > max) throw new HttpError(413, "Request body is too large.");
+      if (!text.trim()) return {};
+      try {
+        const v = JSON.parse(text);
+        return v && typeof v === "object" ? v : {};
+      } catch {
+        throw new HttpError(400, "Request body must be JSON.");
+      }
+    }
+    if (typeof pre === "object") {
+      if (JSON.stringify(pre).length > max) throw new HttpError(413, "Request body is too large.");
+      return pre;
+    }
+    throw new HttpError(400, "Request body must be JSON.");
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const c of req) {
+    size += c.length;
+    if (size > max) throw new HttpError(413, "Request body is too large.");
+    chunks.push(c);
+  }
+  if (!size) return {};
+  try {
+    const v = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return v && typeof v === "object" ? v : {};
+  } catch {
+    throw new HttpError(400, "Request body must be JSON.");
+  }
+}

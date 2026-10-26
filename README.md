@@ -395,3 +395,5 @@ The dashboard is one page (`public/`): upload, validate, edit slides/narration/a
 See [docs/CLOUD.md](docs/CLOUD.md). Run it locally with `npm run cloud:dev` (http://127.0.0.1:8790/).
 The previous local-engine page is kept, unlinked, at `public/legacy/` and still served by `npm run dashboard`.
 Rendering on your own Windows PC instead of a cloud server: see [docs/ENGINE.md](docs/ENGINE.md) (`npm run engine`).
+
+A video that is already in a private Vercel Blob store can be shown (play + download, sign-in required) without any database: see [docs/LIBRARY.md](docs/LIBRARY.md).

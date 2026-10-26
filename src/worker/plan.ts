@@ -60,7 +60,9 @@ export async function preparePlan(env: JobEnv, course: any, ws: Workspace): Prom
   }
 
   let tail = "";
-  const r = await runChild(env, "src/animate.ts", ["analyze", "--force"], ws.childEnv, {
+  // Optional AI planning (paid, off by default). Any per-slide failure falls back to the deterministic planner.
+  const useAi = process.env.ANIMATION_AI === "true" && Boolean(process.env.OPENAI_API_KEY?.trim());
+  const r = await runChild(env, "src/animate.ts", ["analyze", "--force", ...(useAi ? ["--ai"] : [])], ws.childEnv, {
     onLine: (l) => (tail = (tail + "\n" + l).slice(-1500)),
     snapshot: () => ({ percent: 5, stage: "plan", detail: "Analysing slides and narration…" }),
   });

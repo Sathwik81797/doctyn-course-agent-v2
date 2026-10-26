@@ -353,3 +353,11 @@ body[data-view="studio"] .footer { display: none; }
   .editor-grid, .preview-row { grid-template-columns: minmax(0, 1fr); }
   .slide-list { max-height: 220px; }
 }
+
+/* ---------- animation preview ---------- */
+.scene-preview { margin: 0.75rem 0; }
+.scene-stage { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #0a1b33; aspect-ratio: 16 / 9; }
+.scene-stage svg { display: block; width: 100%; height: 100%; }
+.scene-preview input[type="range"] { width: 100%; margin-top: 0.4rem; }
+.scene-labels { display: grid; gap: 0.4rem; margin: 0.5rem 0; }
+.scene-labels label { display: grid; gap: 0.15rem; font-size: 0.85rem; color: var(--ink-2); }

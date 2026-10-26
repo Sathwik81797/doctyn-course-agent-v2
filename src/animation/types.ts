@@ -16,6 +16,9 @@ export const TEMPLATES = [
   "timeline",
   "case",
   "algorithm",
+  "compare",
+  "workflow",
+  "organ-map",
   "key-points",
 ] as const;
 export type TemplateId = (typeof TEMPLATES)[number];
@@ -69,6 +72,28 @@ export const ReviewSchema = z.object({
 });
 export type Review = z.infer<typeof ReviewSchema>;
 
+/** An on-screen element of a derived scene (text comes from the slide or narration; cues anchor it to the voice). */
+export const ItemSchema = z.object({
+  id: z.string().min(1).max(40),
+  label: z.string().max(240),
+  cues: z.array(z.string().max(120)).max(6),
+  free: z.boolean().optional(),
+  frac: z.number().min(0).max(1).optional(),
+  description: z.string().max(120).optional(),
+});
+
+export const CATEGORIES = ["anatomy", "pathophysiology", "physiology", "clinical-pathway", "timeline", "treatment-algorithm", "diagnostic-workflow", "laboratory", "comparison", "clinical-case", "general"] as const;
+export type Category = (typeof CATEGORIES)[number];
+
+/** What the planner understood about the slide: shown to the reviewer next to the template choice. */
+export const AnalysisSchema = z.object({
+  category: z.enum(CATEGORIES),
+  topic: z.string().max(200),
+  objective: z.string().max(300),
+  mechanism: z.string().max(300).optional(),
+});
+export type Analysis = z.infer<typeof AnalysisSchema>;
+
 export const SlidePlanSchema = z.object({
   slide: z.number().int().min(1),
   title: z.string(),
@@ -80,6 +105,9 @@ export const SlidePlanSchema = z.object({
   rationale: z.string(),
   analyzer: z.enum(["rules", "ai"]),
   params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
+  /** Elements derived from this slide's own text/narration for reusable templates (authored diabetes scenes keep theirs in content.ts). */
+  items: z.array(ItemSchema).max(40).optional(),
+  analysis: AnalysisSchema.optional(),
   /** Element label overrides (element id -> text). */
   labels: z.record(z.string(), z.string().max(120)),
   durationSeconds: z.number().positive(),

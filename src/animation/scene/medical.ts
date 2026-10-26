@@ -4,13 +4,15 @@
  * Pure SVG, no Node/DOM dependencies (shared with the browser studio).
  */
 import { authoredFor, type Item } from "./content.js";
+import { ORGANS } from "./derive.js";
 import { C, clamp01, fx, lerp, multiline, text, wrap } from "./kit.js";
 import type { Ctx, ElementSpec, SceneInput, TemplateDef } from "./kit.js";
 
 // ---------- helpers ----------
 function itemsFor(plan: SceneInput): Item[] {
   const a = authoredFor(plan.slide, plan.title);
-  return a && a.template === plan.template ? a.items : [];
+  if (a && a.template === plan.template) return a.items;
+  return (plan.items ?? []) as Item[];
 }
 
 function elementsFromItems(plan: SceneInput): ElementSpec[] {
@@ -443,9 +445,9 @@ function drawLabBranch(c: Ctx): string {
     const { head, sub } = parts(c, id);
     s.push(`<g opacity="${o2(p)}" transform="translate(${fx((1 - p) * (x < 960 ? -40 : 40))} 0)">`);
     s.push(rect(x, 520, 490, 210, 28, C.panel, color, 4 + 3 * c.pulse(id)));
-    const hb = block(x + 245, 580, 440, head, 30, C.ink, 800, "middle");
+    const hb = block(x + 245, 570, 440, head, head.length > 34 ? 25 : 30, C.ink, 800, "middle");
     s.push(hb.svg);
-    s.push(block(x + 245, 580 + hb.h + 18, 440, sub, 34, color, 800, "middle").svg);
+    s.push(block(x + 245, 570 + hb.h + 14, 440, sub, sub.length > 48 ? 25 : sub.length > 26 ? 29 : 34, color, 800, "middle").svg);
     s.push(`</g>`);
   };
   branch("hi", 1320, C.glucose, gx + r + 26);
@@ -637,8 +639,9 @@ function drawTimeline(c: Ctx): string {
     s.push(`<line x1="${x}" y1="${ly}" x2="${x}" y2="${ly + 54}" stroke="${C.teal}" stroke-width="5"/>`);
     s.push(`<circle cx="${x}" cy="${ly}" r="${fx(20 + 4 * c.pulse(id))}" fill="${C.teal}" stroke="#06101F" stroke-width="5"/>`);
     s.push(rect(bx, ly + 54, bw, 215, 24, C.panel, C.teal, 3 + 3 * c.pulse(id)));
-    s.push(block(bx + bw / 2, ly + 104, bw - 40, head, 31, C.ink, 800, "middle").svg);
-    s.push(block(bx + bw / 2, ly + 104 + 44, bw - 50, sub, 25, C.dim, 500, "middle").svg);
+    const hb = block(bx + bw / 2, ly + 100, bw - 40, head, head.length > 24 ? 26 : 31, C.ink, 800, "middle");
+    s.push(hb.svg);
+    s.push(block(bx + bw / 2, ly + 100 + hb.h + 8, bw - 50, sub, 24, C.dim, 500, "middle").svg);
     s.push(`</g>`);
     if (id === "m1") s.push(`<circle cx="${x}" cy="${ly}" r="${fx(34 + 10 * Math.sin(t * 3))}" fill="none" stroke="${C.teal}" stroke-width="3" opacity=".5"/>`);
   });
@@ -722,7 +725,7 @@ function drawCase(c: Ctx): string {
       const verb = /^(Stop|Start|Counsel)$/i.exec(key)?.[1]?.toLowerCase();
       s.push(`<g opacity="${o2(lp)}" transform="translate(${fx((1 - lp) * 36)} 0)">`);
       s.push(rect(x + 18, y, pw - 36, lineH - 14, 18, mix("#0A1B33", color, 0.16), mix(color, "#0A1B33", 0.35), 2));
-      const vs = small ? 25 : 31;
+      const vs = small || val.length > 40 ? 25 : 31;
       if (verb) {
         const vc = verb === "stop" ? C.red : verb === "start" ? C.green : C.teal;
         s.push(`<circle cx="${fx(x + 58)}" cy="${fx(y + (lineH - 14) / 2)}" r="22" fill="${vc}"/>`);
@@ -814,6 +817,148 @@ function drawAlgorithm(c: Ctx): string {
   return s.join("");
 }
 
+// ---------- compare (two sides, row by row) ----------
+function drawCompare(c: Ctx): string {
+  const { t } = c;
+  const s: string[] = [];
+  const ax = 110;
+  const bx = 1030;
+  const pw = 780;
+  const rows = Math.max(idsOf(c, "a").length, idsOf(c, "b").length, 1);
+  const rh = Math.min(140, Math.floor(520 / rows));
+  const sides: Array<[string, string, string, number]> = [["A", "a", C.insulin, ax], ["B", "b", C.glucose, bx]];
+  for (const [head, prefix, color, x] of sides) {
+    const hp = c.p(head);
+    if (hp > 0.01 && has(c, head)) {
+      s.push(`<g opacity="${o2(hp)}" transform="translate(${fx((1 - hp) * (x < 900 ? -40 : 40))} 0)">`);
+      s.push(rect(x, 160, pw, 100, 28, mix(C.panel, color, 0.3), color, 4 + 3 * c.pulse(head)));
+      s.push(block(x + pw / 2, 222, pw - 60, lbl(c, head), 40, C.ink, 800, "middle").svg);
+      s.push(`</g>`);
+    }
+    idsOf(c, prefix).forEach((id, i) => {
+      const p = c.p(id);
+      if (p <= 0.01) return;
+      const y = 290 + i * (rh + 14);
+      s.push(`<g opacity="${o2(p)}" transform="translate(${fx((1 - p) * (x < 900 ? -50 : 50))} 0)">`);
+      s.push(rect(x, y, pw, rh, 22, C.panel, color, 3 + 3 * c.pulse(id)));
+      s.push(`<circle cx="${fx(x + 38)}" cy="${fx(y + rh / 2)}" r="12" fill="${color}"/>`);
+      const size = rh < 110 ? 26 : 29;
+      const n = wrap(lbl(c, id), Math.max(6, Math.floor((pw - 110) / (size * 0.52)))).length;
+      s.push(block(x + 70, y + rh / 2 - ((n - 1) * size * 1.25) / 2 + size * 0.35, pw - 110, lbl(c, id), size, C.ink, 600).svg);
+      s.push(`</g>`);
+    });
+  }
+  const both = Math.min(c.p("A"), c.p("B"));
+  if (both > 0.01) {
+    s.push(`<g opacity="${o2(both)}"><circle cx="960" cy="210" r="46" fill="${C.teal}" opacity="${o2(0.85 + 0.15 * Math.sin(t * 3))}"/>${text(960, 226, "VS", 40, "#06101F", { anchor: "middle", weight: 800 })}</g>`);
+    s.push(`<line x1="960" y1="270" x2="960" y2="${fx(290 + rows * (rh + 14))}" stroke="#2B5A8E" stroke-width="3" stroke-dasharray="10 10" opacity="${o2(both * 0.7)}"/>`);
+  }
+  s.push(note(c, "verdict", C.teal, 330, 1260, 800));
+  return s.join("");
+}
+
+// ---------- workflow (ordered steps and decisions) ----------
+function drawWorkflow(c: Ctx): string {
+  const { t } = c;
+  const s: string[] = [];
+  const ids = idsOf(c, "w");
+  const K = Math.max(1, ids.length);
+  const perRow = K <= 3 ? K : 3;
+  const rowsN = Math.ceil(K / perRow);
+  const gap = 96;
+  const cw = Math.min(540, Math.floor((1740 - gap * (perRow - 1)) / perRow));
+  const ch = rowsN === 1 ? 300 : 250;
+  const total = perRow * cw + (perRow - 1) * gap;
+  const x0 = (1920 - total) / 2;
+  const y0 = rowsN === 1 ? 330 : 190;
+  const pos = (i: number): [number, number] => [x0 + (i % perRow) * (cw + gap), y0 + Math.floor(i / perRow) * (ch + 90)];
+  ids.forEach((id, i) => {
+    const [x, y] = pos(i);
+    const p = c.p(id);
+    const kind = prm<string>(c, `${id}.kind`, "action");
+    const color = kind === "decision" ? C.glucose : kind === "start" ? C.green : C.teal;
+    if (i > 0) {
+      const [px, py] = pos(i - 1);
+      const sameRow = Math.floor((i - 1) / perRow) === Math.floor(i / perRow);
+      if (sameRow) {
+        s.push(arrow(px + cw + 8, py + ch / 2, x - 10, y + ch / 2, p, color, 7));
+        s.push(flowDots(px + cw + 8, py + ch / 2, x - 10, y + ch / 2, p, t, color));
+      } else {
+        if (p > 0.01) {
+          const midY = py + ch + 45;
+          s.push(`<path d="M ${fx(px + cw / 2)} ${fx(py + ch + 6)} L ${fx(px + cw / 2)} ${fx(midY)} L ${fx(x + cw / 2)} ${fx(midY)} L ${fx(x + cw / 2)} ${fx(y - 14)}" stroke="${color}" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="${o2(p)}"/>`);
+          s.push(`<path d="M ${fx(x + cw / 2 - 14)} ${fx(y - 30)} L ${fx(x + cw / 2)} ${fx(y - 10)} L ${fx(x + cw / 2 + 14)} ${fx(y - 30)}" stroke="${color}" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="${o2(p)}"/>`);
+        }
+      }
+    }
+    if (p <= 0.01) return;
+    const { head, sub } = parts(c, id);
+    s.push(`<g opacity="${o2(p)}" transform="translate(0 ${fx((1 - p) * 28)})">`);
+    s.push(rect(x, y, cw, ch, kind === "decision" ? 60 : 28, C.panel, color, 4 + 3 * c.pulse(id)));
+    s.push(`<circle cx="${fx(x + 44)}" cy="${fx(y + 44)}" r="24" fill="${color}"/>`);
+    s.push(text(x + 44, y + 54, kind === "decision" ? "?" : String(i + 1), 28, "#06101F", { anchor: "middle", weight: 800 }));
+    if (kind === "decision") s.push(text(x + cw - 34, y + 50, "DECISION", 20, color, { anchor: "end", weight: 800 }));
+    const hb = block(x + cw / 2, y + 118, cw - 60, head, head.length > 26 ? 29 : 33, C.ink, 800, "middle");
+    s.push(hb.svg);
+    if (sub) s.push(block(x + cw / 2, y + 118 + hb.h + 12, cw - 60, sub, 24, C.dim, 500, "middle").svg);
+    s.push(`</g>`);
+  });
+  return s.join("");
+}
+
+// ---------- organ map (schematic markers on a body outline) ----------
+const ORGAN_COLORS = [C.teal, C.insulin, C.glucose, C.purple, C.green, C.red];
+
+function drawOrganMap(c: Ctx): string {
+  const { t } = c;
+  const s: string[] = [];
+  const cx = 960;
+  const skin = "#1E4272";
+  const edge = "#4B7BB0";
+  for (const sg of [-1, 1]) {
+    s.push(rect(cx + sg * 56 - 43, 560, 86, 250, 34, skin, edge, 3));
+    s.push(rect(cx + sg * 162 - 26, 306, 52, 250, 26, skin, edge, 3));
+  }
+  s.push(`<path d="M ${cx - 124} 318 Q ${cx} 268 ${cx + 124} 318 Q ${cx + 130} 410 ${cx + 118} 480 Q ${cx + 120} 520 ${cx + 120} 580 L ${cx - 120} 580 Q ${cx - 120} 520 ${cx - 118} 480 Q ${cx - 130} 410 ${cx - 124} 318 Z" fill="${skin}" stroke="${edge}" stroke-width="3"/>`);
+  s.push(`<circle cx="${cx}" cy="212" r="54" fill="${skin}" stroke="${edge}" stroke-width="3"/>`);
+  s.push(rect(cx - 18, 256, 36, 40, 10, skin));
+
+  const ids = idsOf(c, "o");
+  const left: string[] = [];
+  const right: string[] = [];
+  for (const id of ids) {
+    const organ = ORGANS[prm<string>(c, `${id}.organ`, "")];
+    const x = organ?.at[0]?.[0] ?? 960;
+    (x < 955 ? left : x > 965 ? right : left.length <= right.length ? left : right).push(id);
+  }
+  ids.forEach((id, i) => {
+    const p = c.p(id);
+    const organ = ORGANS[prm<string>(c, `${id}.organ`, "")];
+    if (!organ || p <= 0.01) return;
+    const color = ORGAN_COLORS[i % ORGAN_COLORS.length]!;
+    const isLeft = left.includes(id);
+    const slot = (isLeft ? left : right).indexOf(id);
+    const cardX = isLeft ? 110 : 1250;
+    const cardW = 560;
+    const cardH = 150;
+    const cardY = 170 + slot * (cardH + 24);
+    const { head, sub } = parts(c, id);
+    for (const [mx, my] of organ.at) {
+      const edgeX = isLeft ? cardX + cardW : cardX;
+      s.push(`<line x1="${edgeX}" y1="${cardY + cardH / 2}" x2="${mx}" y2="${my}" stroke="${color}" stroke-width="3" stroke-dasharray="8 8" opacity="${o2(p * 0.8)}"/>`);
+      s.push(`<circle cx="${mx}" cy="${my}" r="${fx(30 + 7 * Math.sin(t * 3 + i) * p + 6 * c.pulse(id))}" fill="${color}" opacity="${o2(0.28 * p)}"/>`);
+      s.push(`<circle cx="${mx}" cy="${my}" r="14" fill="${color}" stroke="#06101F" stroke-width="4" opacity="${o2(p)}"/>`);
+    }
+    s.push(`<g opacity="${o2(p)}" transform="translate(${fx((1 - p) * (isLeft ? -40 : 40))} 0)">`);
+    s.push(rect(cardX, cardY, cardW, cardH, 24, C.panel, color, 4 + 3 * c.pulse(id)));
+    s.push(text(cardX + 30, cardY + 50, head, 36, color, { weight: 800 }));
+    if (sub) s.push(block(cardX + 30, cardY + 90, cardW - 60, sub, 24, C.ink, 500).svg);
+    s.push(`</g>`);
+  });
+  s.push(note(c, "note", C.teal, 330, 1260, 840));
+  return s.join("");
+}
+
 // ---------- registry ----------
 const def = (name: string, draw: (c: Ctx) => string): TemplateDef => ({ name, elements: elementsFromItems, draw });
 
@@ -829,5 +974,8 @@ export const MEDICAL_TEMPLATES = {
   timeline: def("Follow-up timeline with persistent-risk band", drawTimeline),
   case: def("Clinical case board (patient · labs · interpretation · plan)", drawCase),
   algorithm: def("Clinical algorithm rail with step details", drawAlgorithm),
+  compare: def("Two-sided comparison (row by row)", drawCompare),
+  workflow: def("Ordered workflow: steps and decisions (diagnostic / treatment)", drawWorkflow),
+  "organ-map": def("Organ map: schematic markers on a body outline", drawOrganMap),
 } satisfies Record<string, TemplateDef>;
 

@@ -75,6 +75,10 @@ export function applyEdit(plan: CoursePlan, n: number, rawEdit: unknown): SlideP
       { template: edit.template, rationale: "Chosen manually in the studio." },
     );
     Object.assign(slide, { template: fresh.template, rationale: fresh.rationale, params: fresh.params, labels: {}, events: fresh.events, popups: fresh.popups, flags: fresh.flags });
+    if (fresh.items) slide.items = fresh.items;
+    else delete slide.items;
+    if (fresh.analysis) slide.analysis = fresh.analysis;
+    else delete slide.analysis;
   }
   if (edit.slideText !== undefined) slide.slideText = edit.slideText;
   if (edit.params !== undefined) slide.params = edit.params;

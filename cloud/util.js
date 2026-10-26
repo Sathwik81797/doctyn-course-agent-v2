@@ -64,5 +64,21 @@ export function cleanText(v, max) {
 /** Must match TEMPLATES in src/animation/types.ts (a unit test enforces this). */
 export const ANIMATION_TEMPLATES = [
   "glucose-uptake", "visceral-fat", "continuum", "pathway", "converge", "balance", "body", "lab-branch",
-  "homa", "ogtt", "stagemap", "timeline", "case", "algorithm", "key-points",
+  "homa", "ogtt", "stagemap", "timeline", "case", "algorithm", "compare", "workflow", "organ-map", "key-points",
 ];
+
+/**
+ * Vercel only routes single-segment paths under /api/v3/ to the catch-all function (checked on the live site: /api/v3/health
+ * works, /api/v3/auth/me is a platform 404). The dashboard therefore calls /api/v3/route?p=auth/me&download=1, and this
+ * rewrites req.url to the real route (/api/v3/auth/me?download=1) before routing. Multi-segment paths keep working
+ * wherever the platform delivers them (tests, local servers).
+ * @param {{ url?: string | undefined }} req
+ */
+export function normalizeRouteUrl(req) {
+  const u = new URL(req.url ?? "/", "http://localhost");
+  if (u.pathname.replace(/\/+$/, "") !== "/api/v3/route") return;
+  const p = (u.searchParams.get("p") ?? "").replace(/^\/+/, "");
+  u.searchParams.delete("p");
+  const rest = u.searchParams.toString();
+  req.url = `/api/v3/${p}${rest ? `?${rest}` : ""}`;
+}

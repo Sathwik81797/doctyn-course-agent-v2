@@ -29,7 +29,7 @@ const IMPORT_FILES: Array<{ name: keyof typeof OUTPUT_FILES; rel: string }> = [
  * The enhanced video keeps its status: a ".draft." file (or any plan with unapproved slides) is imported as an
  * unapproved DRAFT and stays private to the owner.
  */
-export async function importCourse(ctx: Ctx, opts: { dir: string; ownerId: string; log?: (m: string) => void }): Promise<ImportResult | null> {
+export async function importCourse(ctx: Ctx, opts: { dir: string; ownerId: string; log?: (m: string) => void; finalize?: boolean }): Promise<ImportResult | null> {
   const log = opts.log ?? (() => {});
   const dir = path.resolve(opts.dir);
   const metaFile = path.join(dir, "course.json");
@@ -82,13 +82,18 @@ export async function importCourse(ctx: Ctx, opts: { dir: string; ownerId: strin
     log("  caching audio and segments for reuse…");
     await syncCacheUp({ ctx } as JobEnv, opts.ownerId, id, dir);
 
+    const completedAt = meta.generatedAt ?? new Date().toISOString();
+    if (opts.finalize) {
+      // The videos are already known, so make them playable now instead of when the engine has re-read the sources.
+      await ctx.db.query("UPDATE courses SET status = 'complete', outputs = $2::jsonb, duration_seconds = $3, completed_at = $4, updated_at = now() WHERE id = $1", [id, JSON.stringify(outputs), meta.durationSeconds ?? 0, completedAt]);
+    }
     // The parse job re-reads the sources (slide text, previews, plan) and then marks the course complete with these outputs.
     await enqueue(ctx.db, {
       courseId: id,
       ownerId: opts.ownerId,
       kind: "parse",
       maxAttempts: ctx.config.jobMaxAttempts,
-      payload: { import: { outputs, durationSeconds: meta.durationSeconds ?? 0, completedAt: meta.generatedAt ?? new Date().toISOString(), animatedDraft } },
+      payload: { import: { outputs, durationSeconds: meta.durationSeconds ?? 0, completedAt, animatedDraft } },
     });
     log("  queued for validation (no video is regenerated)");
     return { courseId: id, created: true, title: meta.courseTitle };

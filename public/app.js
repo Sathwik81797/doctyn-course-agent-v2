@@ -4,6 +4,14 @@
 import { $, el, formatBytes, formatClock, formatDuration, fullDate, svgPlay, timeAgo, toast } from "./ui.js";
 
 const API = "/api/v3";
+/**
+ * Every API URL is a single path segment under /api/v3/ (…/route?p=auth/me): that is the only shape the Vercel
+ * deployment routes to the API function. The server turns it back into the real route.
+ */
+function apiUrl(path) {
+  const [p, query = ""] = path.replace(/^\/+/, "").split("?");
+  return `${API}/route?p=${encodeURIComponent(p)}${query ? `&${query}` : ""}`;
+}
 const STORE_KEY = "doctyn.course";
 
 const STATUS_LABEL = {
@@ -43,7 +51,7 @@ const state = {
 async function call(method, path, body) {
   let res;
   try {
-    res = await fetch(API + path, {
+    res = await fetch(apiUrl(path), {
       method,
       credentials: "same-origin",
       headers: { "X-Requested-With": "doctyn", ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
@@ -58,7 +66,7 @@ async function call(method, path, body) {
   let data = null;
   try { data = JSON.parse(text); } catch { /* not JSON */ }
   if (!res.ok) {
-    const e = new Error(data?.error || `Request failed (HTTP ${res.status}).`);
+    const e = new Error(data?.error || `The server answered HTTP ${res.status} for ${path.split("?")[0]}.`);
     e.status = res.status;
     e.problems = data?.problems;
     throw e;
@@ -74,7 +82,7 @@ const storageSet = (k, v) => { try { v === null ? localStorage.removeItem(k) : l
 const courseBusy = (c) => Boolean(c) && ACTIVE_STATUS.includes(c.status);
 const jobActive = (j) => Boolean(j) && ["queued", "running"].includes(j.status);
 const dirty = () => Object.keys(state.editor.drafts).length > 0 || Object.keys(state.editor.anim).length > 0;
-const fileUrl = (c, name, download = false) => `${API}/courses/${c.id}/files/${name}${download ? "?download=1" : ""}`;
+const fileUrl = (c, name, download = false) => apiUrl(`/courses/${c.id}/files/${name}${download ? "?download=1" : ""}`);
 
 // ---------- session and boot ----------
 
@@ -182,13 +190,13 @@ function authCard() {
     msg,
     el("div", { class: "row between wrap gap" },
       submit,
-      el("button", { class: "link-btn", type: "button", onclick: () => { state.mode = login ? "register" : "login"; $("auth-gate").replaceChildren(authCard()); } }, login ? "Create an account" : "I already have an account"),
+      state.meta?.registration === "closed" ? null : el("button", { class: "link-btn", type: "button", onclick: () => { state.mode = login ? "register" : "login"; $("auth-gate").replaceChildren(authCard()); } }, login ? "Create an account" : "I already have an account"),
     ),
   );
   return el("section", { class: "card auth-card" },
     el("div", { class: "card-head" }, el("div", {},
       el("h2", { text: login ? "Sign in" : "Create your account" }),
-      el("p", { class: "muted", text: "Your presentations, scripts and videos are private to your account." }),
+      el("p", { class: "muted", text: state.meta?.registration === "closed" ? "Access is by invitation. Your videos are private and only shown after you sign in." : "Your presentations, scripts and videos are private to your account." }),
     )),
     form,
     state.meta?.registration === "approval" && !login ? el("p", { class: "muted small", text: "New accounts are approved by an administrator before they can sign in." }) : null,
@@ -294,6 +302,12 @@ function setPill(stateName, text) {
 }
 
 function renderPill() {
+  // Library mode: a private video library without a rendering engine (nothing to render here).
+  if (state.meta?.libraryMode) {
+    setPill("online", "Video library");
+    showBanner("Video library mode.", "This site shows videos that are already stored privately. Uploading, editing and rendering need the rendering engine, a database and storage, which are not enabled here yet.");
+    return;
+  }
   const e = state.engine;
   if (!e) return setPill("offline", "Engine status unknown");
   if (e.online) {
@@ -350,6 +364,14 @@ function renderFiles() {
   const { pptx, docx } = state.selected;
   up.textContent = isNew ? "Upload files" : "Replace files";
   up.disabled = state.uploading || busy || (isNew ? !(pptx && docx) : !(pptx || docx));
+  if (state.meta?.libraryMode) {
+    up.disabled = true;
+    const n = $("upload-notice");
+    if (!state.uploading) {
+      n.textContent = "Uploading is not enabled on this site yet (video library mode). Your private videos are listed under Generated Videos.";
+      n.hidden = false;
+    }
+  }
 
   // validation box
   const box = $("validation-box");
@@ -643,7 +665,7 @@ function renderPreviews() {
       const slide = c.slides.find((s) => s.slide === Number(n));
       node = el("div", { class: "clip", "data-clip": key },
         el("span", { class: "clip-title" }, `Slide ${n}${slide ? ` · ${slide.title}` : ""} `, p.stale ? el("span", { class: "badge badge-cancelled", text: "narration changed since" }) : null),
-        el("audio", { controls: true, preload: "none", src: `${API}/courses/${c.id}/previews/${n}?v=${encodeURIComponent(p.at)}` }),
+        el("audio", { controls: true, preload: "none", src: apiUrl(`/courses/${c.id}/previews/${n}?v=${encodeURIComponent(p.at)}`) }),
       );
     }
     keep.push(node);
@@ -717,7 +739,7 @@ function videoCard(c) {
     el("div", { class: "video-actions" },
       el("button", { class: "btn btn-primary small", type: "button", disabled: !playable, onclick: () => openPlayer(c) }, "Play"),
       dl,
-      el("button", { class: "btn btn-secondary small", type: "button", onclick: () => editAgain(c.id) }, "Edit Again"),
+      c.libraryOnly ? null : el("button", { class: "btn btn-secondary small", type: "button", onclick: () => editAgain(c.id) }, "Edit Again"),
     ),
   );
 }
@@ -826,7 +848,7 @@ function slidePane(c, busy) {
 
   // preview
   const img = c.slidePreviews
-    ? el("img", { class: "slide-img", src: `${API}/courses/${c.id}/slides/${n}/image`, alt: `Slide ${n} preview`, loading: "lazy", width: "960", height: "540" })
+    ? el("img", { class: "slide-img", src: apiUrl(`/courses/${c.id}/slides/${n}/image`), alt: `Slide ${n} preview`, loading: "lazy", width: "960", height: "540" })
     : el("div", { class: "slide-img placeholder" }, el("span", { text: "Slide preview is not available yet. It is rendered by the engine when the course is validated." }));
   parts.push(el("div", { class: "preview-row" },
     img,
@@ -871,7 +893,7 @@ function voiceRow(c, s, busy) {
     } }, "Preview this slide's voice"),
   );
   if (edited) row.append(el("span", { class: "small muted", text: "Save to hear the edited narration." }));
-  else if (p) row.append(el("audio", { controls: true, preload: "none", src: `${API}/courses/${c.id}/previews/${n}?v=${encodeURIComponent(p.at)}` }), p.stale ? el("span", { class: "badge badge-cancelled", text: "older narration" }) : el("span", { class: "badge badge-complete", text: "current" }));
+  else if (p) row.append(el("audio", { controls: true, preload: "none", src: apiUrl(`/courses/${c.id}/previews/${n}?v=${encodeURIComponent(p.at)}`) }), p.stale ? el("span", { class: "badge badge-cancelled", text: "older narration" }) : el("span", { class: "badge badge-complete", text: "current" }));
   return row;
 }
 
@@ -912,9 +934,38 @@ function animationBlock(c, s, busy) {
   tmpl.addEventListener("change", () => { animDraft(n).template = tmpl.value; renderEditorChrome(); markListEdited(); });
   box.append(
     el("p", { class: "muted small", text: plan.rationale }),
+    plan.analysis ? el("p", { class: "small", text: `${plan.analysis.category.replace(/-/g, " ")} · ${plan.analysis.topic}${plan.analysis.objective ? ` — ${plan.analysis.objective}` : ""}` }) : null,
+    plan.items?.length ? el("div", { class: "notice", text: "The on-screen labels of this scene were selected automatically from this slide's own text and narration. Check each label against the source, change the animation type if another fits better, and save before generating the video." }) : null,
     plan.template === "key-points" ? el("div", { class: "notice", text: "This slide uses the generic key-points layout because no topic-specific clinical scene fits it. Pick another type if one fits better." }) : null,
     el("label", { class: "field" }, "Animation type", tmpl),
   );
+
+  // live preview: the same renderer that draws the MP4, fed with the saved plan plus any unsaved edits
+  const saved = c.animationEdits?.[String(n)] ?? {};
+  const labelsNow = () => ({ ...(plan.labels ?? {}), ...(saved.labels ?? {}), ...(state.editor.anim[n]?.labels ?? {}) });
+  const stage = el("div", { class: "scene-stage", role: "img", "aria-label": `Slide ${n} animation preview` });
+  const slider = el("input", { type: "range", min: "0", max: String(plan.durationSeconds), step: "0.1", value: String(Math.round(plan.durationSeconds * 0.8 * 10) / 10), "aria-label": "Preview time in seconds" });
+  const drawPreview = () => {
+    if (!window.DoctynScene) { stage.textContent = "The preview could not be loaded."; return; }
+    try {
+      const svg = window.DoctynScene.renderFrame({ ...plan, slideText: eff.slideText, labels: labelsNow(), events: eff.events, popups: eff.popups }, Number(slider.value), { watermark: "DRAFT PREVIEW" });
+      const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
+      stage.replaceChildren(document.importNode(doc.documentElement, true));
+    } catch { stage.textContent = "This slide could not be previewed."; }
+  };
+  slider.addEventListener("input", drawPreview);
+  drawPreview();
+  box.append(el("div", { class: "scene-preview" }, stage, slider,
+    eff.template !== plan.template ? el("p", { class: "small muted", text: "The preview shows the planned type. Save, then refresh the animation plan to preview the new type." }) : null));
+  if (plan.items?.length) {
+    const fields = el("div", { class: "scene-labels" });
+    for (const it of plan.items) {
+      const input = el("input", { type: "text", maxlength: "120", disabled: busy, "aria-label": `Slide ${n} label ${it.id}`, value: labelsNow()[it.id] ?? it.label });
+      input.addEventListener("input", () => { animDraft(n).labels = { ...labelsNow(), [it.id]: input.value }; drawPreview(); renderEditorChrome(); markListEdited(); });
+      fields.append(el("label", {}, it.description ?? it.id, input));
+    }
+    box.append(el("details", { class: "scene-label-edit" }, el("summary", { text: "Edit on-screen labels (use | to split a heading from its detail)" }), fields));
+  }
 
   const over = el("textarea", { rows: "3", disabled: busy, "aria-label": `Slide ${n} overlay text` });
   over.value = eff.slideText.join("\n");

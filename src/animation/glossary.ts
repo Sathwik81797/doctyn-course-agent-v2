@@ -33,6 +33,17 @@ export const GLOSSARY: GlossaryEntry[] = [
   { title: "Sulfonylurea", terms: ["sulfonylurea"], text: "Oral drug that stimulates insulin release from beta cells, so it depends on remaining beta-cell function." },
   { title: "Metformin", terms: ["metformin"], text: "Oral drug that mainly reduces hepatic glucose production and improves insulin sensitivity." },
   { title: "GAD antibodies", terms: ["gad antibodies"], text: "Autoantibodies against glutamic acid decarboxylase; a marker of autoimmune beta-cell destruction." },
+  { title: "Troponin", terms: ["troponin"], text: "Cardiac regulatory protein released into the blood when heart muscle cells are injured; a sensitive marker of myocardial injury." },
+  { title: "Ischaemia", terms: ["ischaemia", "ischemia"], text: "Inadequate blood supply to a tissue, so oxygen delivery falls short of demand." },
+  { title: "Myocardial infarction", terms: ["myocardial infarction"], text: "Death of heart muscle caused by prolonged ischaemia." },
+  { title: "STEMI", terms: ["stemi", "st-elevation myocardial infarction"], text: "ST-elevation myocardial infarction: a myocardial infarction with ST-segment elevation on the ECG." },
+  { title: "NSTEMI", terms: ["nstemi", "non-st-elevation myocardial infarction"], text: "Non-ST-elevation myocardial infarction: myocardial infarction without ST-segment elevation on the ECG." },
+  { title: "Reperfusion", terms: ["reperfusion"], text: "Restoring blood flow to ischaemic tissue, for example by opening a blocked coronary artery." },
+  { title: "Atherosclerosis", terms: ["atherosclerosis", "atherosclerotic"], text: "Build-up of fatty plaque in the walls of arteries, narrowing them over time." },
+  { title: "Dyslipidaemia", terms: ["dyslipidaemia", "dyslipidemia"], text: "Abnormal levels of blood lipids such as cholesterol and triglycerides." },
+  { title: "Thrombus", terms: ["thrombus"], text: "A blood clot formed inside a blood vessel." },
+  { title: "Necrosis", terms: ["necrosis"], text: "Death of cells or tissue caused by injury or loss of blood supply." },
+  { title: "Remodelling", terms: ["remodelling", "remodeling"], text: "Gradual change in the size, shape and function of the heart after injury." },
 ];
 
-export const DRUG_TERMS = ["metformin", "sulfonylurea", "insulin therapy", "statin", "glp-1", "sglt2", "dpp-4", "pioglitazone"];
+export const DRUG_TERMS = ["aspirin", "clopidogrel", "ticagrelor", "heparin", "thrombolysis", "nitrate", "beta-blocker", "ace inhibitor", "metformin", "sulfonylurea", "insulin therapy", "statin", "glp-1", "sglt2", "dpp-4", "pioglitazone"];

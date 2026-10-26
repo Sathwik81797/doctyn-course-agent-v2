@@ -4,10 +4,10 @@
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import {
-  HttpError, audit, clearCookie, login, logout, publicUser, register, sessionCookie, sessionTokenFromCookie, userForToken,
+  HttpError, audit, clearCookie, login, logout, publicUser, readJsonBody, register, sessionCookie, sessionTokenFromCookie, userForToken,
 } from "./auth.js";
 import { engineStatus, enqueue, reapStale, requestCancel, retryJob } from "./queue.js";
-import { ANIMATION_TEMPLATES, OUTPUT_FILES, UUID_RE, cleanText, contentHash, courseKeys, narrationHash, parseSlideList } from "./util.js";
+import { ANIMATION_TEMPLATES, OUTPUT_FILES, UUID_RE, cleanText, contentHash, courseKeys, narrationHash, normalizeRouteUrl, parseSlideList } from "./util.js";
 
 /** @typedef {{ config: import("./config.js").CloudConfig, db: import("./db.js").Db, storage: import("./storage.js").Storage }} Ctx */
 /** @typedef {import("node:http").IncomingMessage} Req */
@@ -27,21 +27,8 @@ export function sendJson(res, status, body, cookies) {
 }
 
 /** @param {Req} req @param {number} [max] */
-async function readJson(req, max = 2 * 1024 * 1024) {
-  const chunks = [];
-  let size = 0;
-  for await (const c of req) {
-    size += c.length;
-    if (size > max) throw new HttpError(413, "Request body is too large.");
-    chunks.push(c);
-  }
-  if (!size) return {};
-  try {
-    const v = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    return v && typeof v === "object" ? v : {};
-  } catch {
-    throw new HttpError(400, "Request body must be JSON.");
-  }
+function readJson(req, max = 2 * 1024 * 1024) {
+  return readJsonBody(req, max);
 }
 
 /** @param {Req} req */
@@ -667,8 +654,8 @@ route("DELETE", "/admin/courses/:id", "user", async (ctx, { res, user, params })
 
 // ---------- dispatcher ----------
 
-/** @param {Req} req @param {import("./config.js").CloudConfig} config */
-function checkCsrf(req, config) {
+/** @param {Req} req @param {{ allowedOrigins: string[] }} config */
+export function checkCsrf(req, config) {
   const method = req.method ?? "GET";
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") return;
   if (req.headers["x-requested-with"] !== "doctyn") throw new HttpError(403, "Missing request header.");
@@ -687,6 +674,7 @@ function checkCsrf(req, config) {
 /** @param {Ctx} ctx @param {Req} req @param {Res} res */
 export async function handleApi(ctx, req, res) {
   try {
+    normalizeRouteUrl(req);
     const url = new URL(req.url ?? "/", "http://localhost");
     const pathname = url.pathname.replace(/^\/api\/v3/, "").replace(/\/+$/, "") || "/";
     const method = req.method === "HEAD" ? "GET" : (req.method ?? "GET");
