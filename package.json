@@ -19,10 +19,12 @@
     "library:dev": "tsx src/library-dev.ts",
     "library:check": "tsx src/library-check.ts",
     "library:migrate": "tsx src/library-migrate.ts",
+    "library:rehearse": "tsx src/library-rehearse.ts",
     "cloud:create-admin": "node cloud/admin-cli.js",
     "worker": "tsx src/worker/index.ts",
     "engine": "tsx src/worker/index.ts",
-    "cloud:e2e": "tsx src/cloud-e2e.ts"
+    "cloud:e2e": "tsx src/cloud-e2e.ts",
+    "blob:check": "tsx src/blob-check.ts"
   },
   "keywords": [],
   "author": "",

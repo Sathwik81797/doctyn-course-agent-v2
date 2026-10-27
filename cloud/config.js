@@ -6,9 +6,12 @@
  * @typedef {Object} CloudConfig
  * @property {boolean} production
  * @property {string | null} databaseUrl
+ * @property {string | null} dbSchema  optional Postgres schema to keep all tables in (needs a direct, non-pooled connection)
+ * @property {boolean} dbSslVerify  verify the database server's TLS certificate (default; DATABASE_SSL=no-verify turns it off)
  * @property {string} localDbDir
- * @property {"s3" | "fs"} storageDriver
+ * @property {"s3" | "fs" | "blob"} storageDriver
  * @property {{ endpoint: string | null, region: string, bucket: string | null, accessKeyId: string | null, secretAccessKey: string | null, forcePathStyle: boolean }} s3
+ * @property {{ token: string | null, prefix: string }} blob  Vercel Blob (private store): the read-write token and the folder all V2 files live under
  * @property {string} fsRoot
  * @property {string | null} secret
  * @property {"open" | "approval"} registrationMode
@@ -35,8 +38,10 @@ export function cloudConfig(env = process.env) {
   return {
     production,
     databaseUrl: env.DATABASE_URL?.trim() || null,
+    dbSchema: env.DB_SCHEMA?.trim() || null,
+    dbSslVerify: env.DATABASE_SSL?.trim() !== "no-verify",
     localDbDir: env.LOCAL_DB_DIR?.trim() || ".data/pglite",
-    storageDriver: env.STORAGE_DRIVER?.trim() === "fs" ? "fs" : "s3",
+    storageDriver: env.STORAGE_DRIVER?.trim() === "fs" ? "fs" : env.STORAGE_DRIVER?.trim() === "blob" ? "blob" : "s3",
     s3: {
       endpoint: env.S3_ENDPOINT?.trim() || null,
       region: env.S3_REGION?.trim() || "auto",
@@ -45,6 +50,7 @@ export function cloudConfig(env = process.env) {
       secretAccessKey: env.S3_SECRET_ACCESS_KEY?.trim() || null,
       forcePathStyle: env.S3_FORCE_PATH_STYLE === "true",
     },
+    blob: { token: env.BLOB_READ_WRITE_TOKEN?.trim() || null, prefix: (env.BLOB_PREFIX?.trim() || "v2").replace(/^\/+|\/+$/g, "") },
     fsRoot: env.LOCAL_STORAGE_DIR?.trim() || ".data/storage",
     secret: env.APP_SECRET?.trim() || null,
     registrationMode: env.REGISTRATION_MODE === "open" ? "open" : "approval",
@@ -67,9 +73,17 @@ export function configProblems(c) {
   if (c.production && !c.databaseUrl) p.push("DATABASE_URL is not set (a Postgres connection string is required in production).");
   if (!c.secret || c.secret.length < 32) p.push("APP_SECRET must be set to a random string of at least 32 characters.");
   if (c.production && c.storageDriver === "fs") p.push("STORAGE_DRIVER=fs is for local development only. Configure S3_* object storage.");
+  if (c.dbSchema && !/^[a-z_][a-z0-9_]{0,40}$/.test(c.dbSchema)) p.push("DB_SCHEMA must be a lower-case Postgres schema name such as doctyn.");
+  if (c.dbSchema && c.databaseUrl && /-pooler\./.test(c.databaseUrl)) p.push("DB_SCHEMA needs the direct (non-pooled) connection string; the pooled one forgets session settings.");
+  if (c.storageDriver === "blob") {
+    if (!c.blob.token) p.push("BLOB_READ_WRITE_TOKEN is not set (the read-write token of your private Vercel Blob store).");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,60}(\/[A-Za-z0-9][A-Za-z0-9._-]{0,60}){0,3}$/.test(c.blob.prefix) || ["courses", "library"].includes(c.blob.prefix.split("/")[0] ?? "")) {
+      p.push("BLOB_PREFIX must be a plain folder name such as v2 (not 'courses', which holds the existing private video library).");
+    }
+  }
   if (c.storageDriver === "s3") {
     for (const [k, v] of Object.entries({ S3_BUCKET: c.s3.bucket, S3_ACCESS_KEY_ID: c.s3.accessKeyId, S3_SECRET_ACCESS_KEY: c.s3.secretAccessKey })) {
-      if (!v) p.push(`${k} is not set.`);
+      if (!v) p.push(`${k} is not set${k === "S3_BUCKET" ? " (or set STORAGE_DRIVER=blob to store files in your private Vercel Blob store instead)" : ""}.`);
     }
   }
   return p;

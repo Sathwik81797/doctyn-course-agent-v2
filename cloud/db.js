@@ -144,11 +144,26 @@ export async function createDb(config) {
   let db;
   if (config.databaseUrl) {
     const { default: pg } = await import("pg");
-    const pool = new pg.Pool({
-      connectionString: config.databaseUrl,
-      max: config.production ? 3 : 10,
-      ssl: /localhost|127\.0\.0\.1/.test(config.databaseUrl) ? undefined : { rejectUnauthorized: false },
-    });
+    // The TLS mode is decided below (ssl option), so drop sslmode from the URL: pg warns about its changing meaning.
+    let connectionString = config.databaseUrl;
+    try {
+      const u = new URL(connectionString);
+      u.searchParams.delete("sslmode");
+      connectionString = u.toString();
+    } catch {
+      /* keep the original */
+    }
+    const base = {
+      connectionString,
+      // Hosted databases (Neon, Supabase, ...) present valid certificates: verify them. DATABASE_SSL=no-verify is the explicit opt-out.
+      ssl: /localhost|127\.0\.0\.1/.test(config.databaseUrl) ? undefined : config.dbSslVerify ? true : { rejectUnauthorized: false },
+    };
+    if (config.dbSchema) {
+      const boot = new pg.Pool({ ...base, max: 1 });
+      await boot.query(`CREATE SCHEMA IF NOT EXISTS "${config.dbSchema}"`);
+      await boot.end();
+    }
+    const pool = new pg.Pool({ ...base, max: config.production ? 3 : 10, ...(config.dbSchema ? { options: `-c search_path=${config.dbSchema}` } : {}) });
     /** @param {{ query: (t: string, p?: any[]) => Promise<any> }} c @returns {Queryable} */
     const wrap = (c) => ({ query: (t, p) => c.query(t, p).then((r) => ({ rows: r.rows, rowCount: r.rowCount ?? 0 })), exec: (t) => c.query(t) });
     db = {

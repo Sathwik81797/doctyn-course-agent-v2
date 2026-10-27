@@ -19,6 +19,7 @@ import { cleanEmail } from "../../cloud/auth.js";
 import { LIBRARY_VIDEOS, type LibraryVideo } from "../../cloud/library-catalog.js";
 import type { Ctx } from "../../cloud/routes.js";
 import { courseKeys } from "../../cloud/util.js";
+import { LIBRARY_KEY_PREFIX } from "../../cloud/storage-blob.js";
 import { importCourse } from "../worker/import-course.js";
 
 export type Level = "error" | "warn" | "info";
@@ -40,6 +41,10 @@ export interface MigrationInput {
   courseDir: string;
   /** library catalogue entry the folder must correspond to */
   video?: LibraryVideo;
+  /** Keep the reusable audio / slide / segment cache in storage (default true; it is about half of the stored size). */
+  cache?: boolean;
+  /** storage driver the import will use ("blob" references the library video in place); defaults to the connected one */
+  storageDriver?: string;
 }
 
 export interface UserPlan {
@@ -56,7 +61,7 @@ export interface MigrationPlan {
   findings: Finding[];
   users: UserPlan[];
   imports: ImportPlan[];
-  video: { title: string; slideCount: number; durationSeconds: number; enhanced: "draft" | "final" | "none"; enhancedBytes: number; totalBytes: number } | null;
+  video: { title: string; slideCount: number; durationSeconds: number; enhanced: "draft" | "final" | "none"; enhancedBytes: number; totalBytes: number; cacheBytes: number; perCopyBytes: number } | null;
   /** True when no database was consulted (dry run without DATABASE_URL): every account is assumed new. */
   databaseChecked: boolean;
 }
@@ -147,7 +152,9 @@ export async function planMigration(ctx: Ctx | null, input: MigrationInput): Pro
     const enhancedBytes = finalBytes ?? draftBytes ?? 0;
     totalBytes += enhancedBytes;
     // finished audio, slide images and segments are stored too, so a later edit only redoes the slides that changed
-    for (const d of ["audio", "slides", "video-segments", path.join("animation", "enhanced", "segments")]) totalBytes += await dirBytes(path.join(input.courseDir, d));
+    let cacheBytes = 0;
+    for (const d of ["audio", "slides", "video-segments", path.join("animation", "enhanced", "segments")]) cacheBytes += await dirBytes(path.join(input.courseDir, d));
+    totalBytes += cacheBytes;
     if (catalog) {
       if (meta.courseTitle !== catalog.title) add("warn", `The folder's title "${meta.courseTitle}" differs from the library entry "${catalog.title}".`);
       if (meta.slideCount !== catalog.slideCount) add("warn", `The folder has ${meta.slideCount} slides; the library entry says ${catalog.slideCount}.`);
@@ -162,7 +169,12 @@ export async function planMigration(ctx: Ctx | null, input: MigrationInput): Pro
     }
     if (enhanced === "none") add("warn", "The folder has no enhanced animated video.");
     if (enhanced === "draft") add("info", "The enhanced video will keep its DRAFT status and stay private to each account (0 clinically approved slides).");
-    video = { title: meta.courseTitle ?? "", slideCount: meta.slideCount ?? 0, durationSeconds: meta.durationSeconds ?? 0, enhanced, enhancedBytes, totalBytes };
+    const driver = ctx?.storage.driver ?? input.storageDriver;
+    // on Vercel Blob the library's own copy of the enhanced video is referenced, not uploaded again
+    const referenced = driver === "blob" && enhanced === "draft" && Boolean(catalog?.files.animated) && enhancedBytes === catalog?.files.animated?.bytes;
+    const perCopyBytes = totalBytes - (input.cache === false ? cacheBytes : 0) - (referenced ? enhancedBytes : 0);
+    if (referenced) add("info", "Vercel Blob storage: the enhanced video is referenced where it already is (read-only), not uploaded again.");
+    video = { title: meta.courseTitle ?? "", slideCount: meta.slideCount ?? 0, durationSeconds: meta.durationSeconds ?? 0, enhanced, enhancedBytes, totalBytes, cacheBytes, perCopyBytes };
   }
 
   // ---- what exists already
@@ -191,7 +203,7 @@ export async function planMigration(ctx: Ctx | null, input: MigrationInput): Pro
   const targets = input.share === "all" ? [...input.users.keys()] : input.users.has(owner) ? [owner] : [];
   const imports: ImportPlan[] = targets.map((email) => ({ email, action: importedBy.has(email) ? "already-imported" : "import" }));
   if (input.share === "all" && targets.length > 1 && video) {
-    add("info", `${targets.length} private copies of the video will be stored (about ${(video.totalBytes / 1048576).toFixed(0)} MB each).`);
+    add("info", `${targets.length} private copies of the video will be stored (about ${(video.perCopyBytes / 1048576).toFixed(0)} MB each).`);
   }
 
   return { ok: !findings.some((f) => f.level === "error"), findings, users, imports, video, databaseChecked: Boolean(ctx) };
@@ -236,10 +248,13 @@ export async function applyMigration(ctx: Ctx, input: MigrationInput, opts: { ma
     }
   }
 
-  // 2. the video, for the owner and (optionally) everyone
+  // 2. the video, for the owner and (optionally) everyone. On Vercel Blob storage the enhanced video that library mode serves is
+  //    referenced in place (read-only) instead of being uploaded again, when the stored object is the same size as the local file.
+  const animatedPath = (input.video ?? LIBRARY_VIDEOS[0])?.files.animated?.pathname;
+  const reference = ctx.storage.driver === "blob" && animatedPath ? { reuseAnimated: { key: `${LIBRARY_KEY_PREFIX}${animatedPath}` } } : {};
   for (const imp of plan.imports) {
     const ownerId = ids.get(imp.email)!;
-    const r = await importCourse(ctx, { dir: input.courseDir, ownerId, log, finalize: true });
+    const r = await importCourse(ctx, { dir: input.courseDir, ownerId, log, finalize: true, cache: input.cache !== false, ...reference });
     if (r?.created) {
       manifest.courses.push({ email: imp.email, ownerId, courseId: r.courseId, importKey: importKeyOf(meta, input.courseDir) });
       await ctx.db.query("INSERT INTO audit_log(user_id, action, target, meta) VALUES ($1, 'migration.library.course', $2, $3::jsonb)", [ownerId, r.courseId, JSON.stringify({ title: r.title })]);

@@ -3,6 +3,13 @@
 Status when written (2026-10-26): inspection only. Nothing was deployed, no environment variable was changed or created, and no
 external service was contacted except two read-only GETs of the live `/api/v3` health/meta endpoints and `vercel env ls`.
 
+## 00. Third pass: Neon + private Vercel Blob (no R2/S3) — see `docs/BLOB-STORAGE.md`
+
+Built and verified live in throw-away namespaces (Neon schema + Blob folder, both removed): `npm run blob:check` (18 checks),
+`E2E_DB=neon E2E_STORAGE=blob npm run cloud:e2e` (40 checks, Kokoro voice), `npm run library:rehearse` (16 checks). Production is still
+library mode. What remains to switch it on: set on Vercel Production `DATABASE_URL`, `STORAGE_DRIVER=blob`, `ADMIN_EMAILS`,
+`REGISTRATION_MODE`, and the same `APP_SECRET` on the PC; run `library:migrate` for real (needs the `LIBRARY_USERS` entries); preview deploy; then production.
+
 ## 0. Second pass (same day): what is now built
 
 | Item | State |

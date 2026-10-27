@@ -7,6 +7,7 @@
  *
  *   --users-file FILE    LIBRARY_USERS entries (email=scrypt-hash, comma or newline separated); default: $LIBRARY_USERS
  *   --owner EMAIL        account that owns the imported video (default: the first library user)
+ *   --no-cache           do not store the reusable audio / slide / segment cache (about half the size; an edit then re-records every slide)
  *   --share owner|all    give the video to the owner only (default) or to every migrated user as private copies
  *   --admin EMAIL        make this migrated account an administrator (repeatable; only for accounts created now)
  *   --course-dir DIR     finished course folder (default: the output/* folder whose title matches the library entry)
@@ -85,7 +86,7 @@ async function main(): Promise<void> {
   }
   const first = [...users.keys()][0]!;
   const share = flag("share") === "all" ? "all" : "owner";
-  const input: MigrationInput = { users, owner: (flag("owner") || first).toLowerCase(), share, admins: all("admin"), courseDir: await findCourseDir() };
+  const input: MigrationInput = { users, owner: (flag("owner") || first).toLowerCase(), share, admins: all("admin"), courseDir: await findCourseDir(), cache: !args.includes("--no-cache"), storageDriver: config.storageDriver };
 
   if (skipped.length) console.log(`Skipped ${skipped.length} malformed LIBRARY_USERS entr${skipped.length === 1 ? "y" : "ies"}: ${skipped.join(", ")}`);
 
@@ -101,7 +102,8 @@ async function main(): Promise<void> {
   console.log(`  source folder : ${input.courseDir}`);
   console.log(`  database      : ${ctx ? "connected" : "not configured (assuming every account is new)"}`);
   console.log(`  owner         : ${input.owner}      video copies: ${share === "all" ? "one per user" : "owner only"}`);
-  if (plan.video) console.log(`  video         : "${plan.video.title}" · ${plan.video.slideCount} slides · ${(plan.video.durationSeconds / 60).toFixed(1)} min · enhanced ${plan.video.enhanced.toUpperCase()} · ${(plan.video.totalBytes / 1048576).toFixed(0)} MB to upload per copy`);
+  if (plan.video) console.log(`  video         : "${plan.video.title}" · ${plan.video.slideCount} slides · ${(plan.video.durationSeconds / 60).toFixed(1)} min · enhanced ${plan.video.enhanced.toUpperCase()} · ${(plan.video.perCopyBytes / 1048576).toFixed(0)} MB to store per copy${args.includes("--no-cache") ? " (no cache)" : ""}`);
+  console.log(`  storage       : ${config.storageDriver}${config.storageDriver === "blob" ? ` (folder ${config.blob.prefix}/, existing library files are never written)` : ""}`);
   console.log("\nAccounts:");
   for (const u of plan.users) console.log(`  ${u.action === "create" ? "+ create " : "= keep   "} ${u.email}  (${u.role})${u.action === "exists-different-password" ? "  existing account has another password" : ""}`);
   console.log("\nVideo:");

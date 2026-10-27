@@ -1,6 +1,7 @@
 // @ts-check
-// Private object storage. Production uses any S3-compatible bucket (AWS S3, Cloudflare R2,
-// Backblaze B2, MinIO...) with short-lived signed URLs; nothing is ever public.
+// Private object storage. Production uses either the private Vercel Blob store that already holds the video library
+// (STORAGE_DRIVER=blob, see storage-blob.js) or any S3-compatible bucket (AWS S3, Cloudflare R2, Backblaze B2, MinIO...),
+// always with short-lived signed URLs; nothing is ever public.
 // The "fs" driver exists for local development and tests only and is refused in production.
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
@@ -9,10 +10,11 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
 import { HttpError } from "./auth.js";
+import { assertKey } from "./storage-keys.js";
 
 /**
  * @typedef {Object} Storage
- * @property {"s3" | "fs"} driver
+ * @property {"s3" | "fs" | "blob"} driver
  * @property {(key: string, o: { contentType: string, size: number }) => Promise<string>} presignPut
  * @property {(key: string, o: { filename?: string, contentType?: string }) => Promise<string>} presignGet
  * @property {(key: string) => Promise<{ size: number } | null>} head
@@ -24,13 +26,6 @@ import { HttpError } from "./auth.js";
  * @property {(prefix: string) => Promise<Array<{ key: string, size: number }>>} list
  * @property {(token: string, req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => Promise<void>} [serveFs]
  */
-
-/** Keys are built by the server from ids; this guards the fs driver and S3 against odd input anyway. @param {string} key */
-function assertKey(key) {
-  if (!key || key.length > 600 || key.startsWith("/") || key.split("/").some((s) => s === ".." || s === "." || s === "") || /[\\\0]/.test(key)) {
-    throw new Error(`Unsafe storage key: ${key}`);
-  }
-}
 
 export const CONTENT_TYPES = /** @type {Record<string, string>} */ ({
   ".mp4": "video/mp4",
@@ -51,6 +46,7 @@ export async function createStorage(config) {
     if (config.production) throw new Error("STORAGE_DRIVER=fs is for local development only.");
     return createFsStorage(config);
   }
+  if (config.storageDriver === "blob") return (await import("./storage-blob.js")).createBlobStorage(config);
   return createS3Storage(config);
 }
 

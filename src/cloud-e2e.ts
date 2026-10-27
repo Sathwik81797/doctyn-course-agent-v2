@@ -7,6 +7,10 @@
  *   -> clinical review -> approved render -> publish -> privacy checks.
  * Uses the voice engine from .env (TTS_PROVIDER=kokoro for the real thing, windows for a quick offline run).
  * E2E_REAL=1 uses DATABASE_URL and S3_* (see docker-compose.dev.yml) instead of the in-process database and disk storage.
+ * E2E_DB=neon uses your Neon database (DATABASE_URL, direct connection) inside a throw-away schema e2e_<random> that is dropped at the end;
+ *   the public schema is never touched.
+ * E2E_STORAGE=blob keeps the in-process database but stores every file in the real private Vercel Blob store
+ * (BLOB_READ_WRITE_TOKEN), under a throw-away folder v2-e2e-<random> that is emptied at the end. Browser uploads go straight to Blob.
  */
 import "dotenv/config";
 import { execFileSync } from "node:child_process";
@@ -25,12 +29,21 @@ import { runWorker } from "./worker/loop.js";
 
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "doctyn-e2e-"));
 const real = process.env.E2E_REAL === "1";
+const blobMode = process.env.E2E_STORAGE === "blob";
+const neonMode = process.env.E2E_DB === "neon";
+const e2eSchema = `e2e_${Math.random().toString(36).slice(2, 10)}`;
+const dbSettings: Record<string, string | undefined> = neonMode
+  ? { DATABASE_URL: process.env.DATABASE_URL?.replace(/-pooler\./, "."), DB_SCHEMA: e2eSchema }
+  : { LOCAL_DB_DIR: "memory://" };
+const blobPrefix = `v2-e2e-${Math.random().toString(36).slice(2, 10)}`;
 const config = cloudConfig(
   real
     ? { ...process.env, APP_SECRET: "e".repeat(40), REGISTRATION_MODE: "open", NODE_ENV: "development" }
-    : { STORAGE_DRIVER: "fs", LOCAL_STORAGE_DIR: path.join(tmp, "storage"), LOCAL_DB_DIR: "memory://", APP_SECRET: "e".repeat(40), REGISTRATION_MODE: "open" },
+    : blobMode
+      ? { STORAGE_DRIVER: "blob", BLOB_READ_WRITE_TOKEN: process.env.BLOB_READ_WRITE_TOKEN, BLOB_PREFIX: blobPrefix, ...dbSettings, APP_SECRET: "e".repeat(40), REGISTRATION_MODE: "open" }
+      : { STORAGE_DRIVER: "fs", LOCAL_STORAGE_DIR: path.join(tmp, "storage"), ...dbSettings, APP_SECRET: "e".repeat(40), REGISTRATION_MODE: "open" },
 );
-console.log(`mode: ${real ? "REAL services (Postgres + S3)" : "in-process Postgres + disk storage"}; voice: ${process.env.TTS_PROVIDER ?? "(from .env)"}`);
+console.log(`mode: ${real ? "REAL services (Postgres + S3)" : `${neonMode ? `Neon Postgres (schema ${e2eSchema})` : "in-process Postgres"} + ${blobMode ? `REAL Vercel Blob (folder ${blobPrefix})` : "disk storage"}`}; voice: ${process.env.TTS_PROVIDER ?? "(from .env)"}`);
 const ctx: Ctx = { config, db: await createDb(config), storage: await createStorage(config) };
 const server = http.createServer((req, res) => void handleApi(ctx, req, res));
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -40,8 +53,19 @@ process.env.TEMP_DIR ??= path.join(tmp, "temp");
 const worker = runWorker(ctx, { workRoot: path.join(tmp, "work"), pollMs: 500, signal: ac.signal, log: (m) => console.log(`  worker: ${m}`), info: { tts: process.env.TTS_PROVIDER ?? "kokoro" } });
 
 let cookie = "";
+/** Reads are retried on a reset socket: the website, the engine and this script share one process, and a busy event loop can drop an idle keep-alive connection. */
+async function fetchRetry(url: string, init: RequestInit): Promise<Response> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fetch(url, init);
+    } catch (err) {
+      if (attempt >= 4 || (init.method ?? "GET") !== "GET") throw err;
+      await new Promise((r) => setTimeout(r, 300 * attempt));
+    }
+  }
+}
 async function api(method: string, p: string, body?: unknown, as = cookie): Promise<any> {
-  const res = await fetch(base + p, {
+  const res = await fetchRetry(base + p, {
     method,
     redirect: "manual",
     headers: { "x-requested-with": "doctyn", cookie: as, ...(body ? { "content-type": "application/json" } : {}) },
@@ -57,12 +81,12 @@ async function api(method: string, p: string, body?: unknown, as = cookie): Prom
   return json;
 }
 async function raw(p: string, as = cookie): Promise<Response> {
-  return fetch(base + p, { redirect: "manual", headers: { "x-requested-with": "doctyn", cookie: as } });
+  return fetchRetry(base + p, { redirect: "manual", headers: { "x-requested-with": "doctyn", cookie: as } });
 }
 async function upload(courseId: string, type: "pptx" | "docx", file: string) {
   const buf = await fs.readFile(file);
   const up = await api("POST", `/api/v3/courses/${courseId}/upload-url`, { type, filename: path.basename(file), size: buf.length });
-  const put = await fetch(base + up.url, { method: "PUT", headers: up.headers, body: buf });
+  const put = await fetch(new URL(up.url, base), { method: "PUT", headers: up.headers, body: buf });
   if (!put.ok) throw new Error(`storage PUT failed: ${put.status}`);
   return api("POST", `/api/v3/courses/${courseId}/files/complete`, { type, key: up.key, filename: path.basename(file) });
 }
@@ -228,6 +252,13 @@ try {
   const dEdit = (await api("GET", `/api/v3/courses/${id}`)).course;
   check(dEdit.animationPlan[1].slideText[0] === "Edited overlay line" && dEdit.animationPlan[1].popups.some((p: any) => p.id === "custom-e2e"), "rendered animation plan carries the overlay text and pop-up");
 
+  console.log("7b. GENERATED VIDEOS lists the finished course with both versions");
+  const listed = (await api("GET", "/api/v3/courses")).courses.find((c: any) => c.id === id);
+  check(listed && listed.status === "complete" && listed.hasVideo && listed.available.animated, "the course appears in the library with its narrated and enhanced videos");
+  check(listed.animatedDraft === true && listed.durationSeconds > 0 && listed.slideCount === 3, "listed as an enhanced DRAFT with its duration and slide count");
+  const lastGet = await raw(`/api/v3/courses/${id}/files/animated`);
+  check(lastGet.status === 302 && new URL(lastGet.headers.get("location")!, base).searchParams.size >= 0, "the enhanced video plays through a signed link");
+
   console.log("8. originals preserved");
   const row = (await ctx.db.query("SELECT pptx_key, docx_key FROM courses WHERE id = $1", [id])).rows[0];
   check((await ctx.storage.head(row.pptx_key))?.size === pptxBytes && (await ctx.storage.head(row.docx_key))?.size === docxBytes, "uploaded PPTX and DOCX are byte-for-byte as uploaded");
@@ -275,11 +306,20 @@ try {
   console.log("\nCLOUD E2E PASS");
 } catch (err) {
   console.error("\nCLOUD E2E FAIL:", err instanceof Error ? err.message : err);
+  if (err instanceof Error && err.cause) console.error("  cause:", err.cause);
+  if (err instanceof Error && process.env.E2E_DEBUG) console.error(err.stack);
   process.exitCode = 1;
 } finally {
   ac.abort();
   await worker;
   server.close();
+  if (blobMode) {
+    // empty the throw-away folder (the adapter can only reach files under it)
+    const left = await ctx.storage.list("users/");
+    for (const o of left) await ctx.storage.remove(o.key);
+    console.log(`blob cleanup: removed ${left.length} test file(s); ${(await ctx.storage.list("users/")).length} left`);
+  }
+  if (neonMode) await ctx.db.query(`DROP SCHEMA IF EXISTS "${e2eSchema}" CASCADE`).then(() => console.log(`neon cleanup: schema ${e2eSchema} dropped`), (err) => console.error(`neon cleanup FAILED for schema ${e2eSchema}: ${err instanceof Error ? err.message : err}`));
   await ctx.db.close();
   await fs.rm(tmp, { recursive: true, force: true });
 }

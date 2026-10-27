@@ -29,7 +29,22 @@ const IMPORT_FILES: Array<{ name: keyof typeof OUTPUT_FILES; rel: string }> = [
  * The enhanced video keeps its status: a ".draft." file (or any plan with unapproved slides) is imported as an
  * unapproved DRAFT and stays private to the owner.
  */
-export async function importCourse(ctx: Ctx, opts: { dir: string; ownerId: string; log?: (m: string) => void; finalize?: boolean }): Promise<ImportResult | null> {
+export interface ImportOptions {
+  dir: string;
+  ownerId: string;
+  log?: (m: string) => void;
+  /** Make the finished videos playable at once instead of when the engine has re-read the sources. */
+  finalize?: boolean;
+  /** Keep the reusable audio / slide / segment cache (default true). Without it an edit re-records every slide. */
+  cache?: boolean;
+  /**
+   * Point the enhanced video at a file that already sits in storage (a "library:<pathname>" key) instead of uploading a copy.
+   * Used only when the stored object has exactly the size of the local file.
+   */
+  reuseAnimated?: { key: string };
+}
+
+export async function importCourse(ctx: Ctx, opts: ImportOptions): Promise<ImportResult | null> {
   const log = opts.log ?? (() => {});
   const dir = path.resolve(opts.dir);
   const metaFile = path.join(dir, "course.json");
@@ -39,6 +54,8 @@ export async function importCourse(ctx: Ctx, opts: { dir: string; ownerId: strin
 
   const found = (await ctx.db.query("SELECT id FROM courses WHERE owner_id = $1 AND import_key = $2 AND deleted_at IS NULL", [opts.ownerId, importKey])).rows[0];
   if (found) return { courseId: found.id, created: false, title: meta.courseTitle };
+  // a course that was imported and later deleted must not block importing it again (the key is unique per owner)
+  await ctx.db.query("UPDATE courses SET import_key = NULL WHERE owner_id = $1 AND import_key = $2 AND deleted_at IS NOT NULL", [opts.ownerId, importKey]);
 
   const pptx = path.join(dir, "presentation.pptx");
   const docx = path.join(dir, "voiceover-script.docx");
@@ -73,14 +90,23 @@ export async function importCourse(ctx: Ctx, opts: { dir: string; ownerId: strin
     let animatedDraft: boolean | null = null;
     if (animFile) {
       animatedDraft = animFile === draftFile || (await planHasUnapproved(dir));
-      const key = keys.output(OUTPUT_FILES.animated.name);
-      outputs.animated = { key, bytes: await ctx.storage.uploadFromFile(key, animFile, OUTPUT_FILES.animated.type), draft: animatedDraft };
-      log(`  ${path.relative(dir, animFile)} (${animatedDraft ? "draft" : "final"})`);
+      const localBytes = (await fs.stat(animFile)).size;
+      const existing = opts.reuseAnimated ? await ctx.storage.head(opts.reuseAnimated.key) : null;
+      if (opts.reuseAnimated && existing?.size === localBytes) {
+        outputs.animated = { key: opts.reuseAnimated.key, bytes: localBytes, draft: animatedDraft };
+        log(`  ${path.relative(dir, animFile)} (${animatedDraft ? "draft" : "final"}) — already in storage, referenced in place`);
+      } else {
+        const key = keys.output(OUTPUT_FILES.animated.name);
+        outputs.animated = { key, bytes: await ctx.storage.uploadFromFile(key, animFile, OUTPUT_FILES.animated.type), draft: animatedDraft };
+        log(`  ${path.relative(dir, animFile)} (${animatedDraft ? "draft" : "final"})`);
+      }
     }
 
     // Finished audio, slide images and segments: later edits reuse everything that did not change.
-    log("  caching audio and segments for reuse…");
-    await syncCacheUp({ ctx } as JobEnv, opts.ownerId, id, dir);
+    if (opts.cache !== false) {
+      log("  caching audio and segments for reuse…");
+      await syncCacheUp({ ctx } as JobEnv, opts.ownerId, id, dir);
+    }
 
     const completedAt = meta.generatedAt ?? new Date().toISOString();
     if (opts.finalize) {
