@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { DRUG_TERMS, GLOSSARY } from "./glossary.js";
 import { authoredFor, TEMPLATE_ASSUMPTIONS } from "./scene/content.js";
 import { elementSpecs, type ElementSpec, type SceneInput } from "./scene/core.js";
+import { structureOf } from "./scene/derive.js";
 import { DERIVABLE, deriveFor, deriveScene, type Derived } from "./scene/derive.js";
 import { findPhrase, LEAD_IN, TAIL, wordTimings, type WordTiming } from "./scene/timing.js";
 import type { Analysis, ClinicalFlag, Popup, SlidePlan, TemplateId, TimelineEvent } from "./types.js";
@@ -22,6 +23,8 @@ export interface SlideSource {
   /** Total slide seconds (lead-in + audio + tail). */
   durationSeconds: number;
   durationSource: "audio" | "estimated";
+  /** Normalised header / footer lines repeated across the deck (see findBoilerplate); ignored as content. */
+  boilerplate?: string[];
 }
 
 interface Rule {
@@ -248,6 +251,7 @@ export function buildFlags(src: SlideSource, template: TemplateId, popups: Popup
     for (const text of derived.assumptions) add("template-assumption", text);
     add("template-assumption", "On-screen labels were selected automatically from this slide's text and narration (shortened at clause boundaries). Check each label, its order and its wording against the source before approving.");
   }
+  if (template === "key-points") add("generic-animation", "No clinical structure (sequence, comparison, timeline, case, test interpretation, steps) was recognised on this slide, so it gets generic key-point cards. Pick a better animation type in the editor, or accept it for an introduction or summary slide.");
   if (template === "continuum") add("template-assumption", "Continuum curves and laboratory tags are illustrative template content, not data from the source.");
   if (template === "glucose-uptake" && !/glut-?4/i.test(src.narration)) add("template-assumption", "Receptor → GLUT4 → glucose-entry mechanism is standard physiology added by the template; the narration does not describe it.");
   if (template === "visceral-fat") add("template-assumption", "The cytokine → blocked insulin-signalling step is drawn as a general mechanism for this slide.");
@@ -316,7 +320,8 @@ export function analyzeSlide(src: SlideSource, override: AnalysisOverride = {}):
     slide: src.slide,
     title: src.title,
     narration: src.narration,
-    slideText: src.slideText,
+    // Slides drawn from the planner's own reading (not an authored scene) keep only the slide's real content lines.
+    slideText: choice.derived || choice.template === "key-points" ? cleanLines(src) : src.slideText,
     template: choice.template,
     params: { ...defaultParams(choice.template, src), ...choice.derived?.params, ...override.params },
     ...(choice.derived ? { items: choice.derived.items } : {}),
@@ -340,6 +345,12 @@ export function analyzeSlide(src: SlideSource, override: AnalysisOverride = {}):
     review: { status: "needs_review" },
   };
   return plan;
+}
+
+/** The slide's own lines without header/footer, counters, step numbers and arrows (subtitle and section headings kept in order). */
+function cleanLines(src: SlideSource): string[] {
+  const st = structureOf(src);
+  return [...(st.subtitle ? [st.subtitle] : []), ...st.items, ...st.sections.flatMap((s) => [s.header, ...s.lines])];
 }
 
 function mergeAnalysis(derived: Analysis | undefined, ai: Partial<Analysis> | undefined, src: SlideSource): Analysis {

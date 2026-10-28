@@ -354,6 +354,16 @@ body[data-view="studio"] .footer { display: none; }
   .slide-list { max-height: 220px; }
 }
 
+/* ---------- animation overview and generic flags ---------- */
+.generic-badge { margin-left: 6px; font-size: 11px; padding: 1px 7px; }
+.generic-note { color: var(--amber); }
+.anim-overview { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 12px; margin-bottom: 12px; background: var(--white); }
+.anim-overview summary { cursor: pointer; font-weight: 600; color: var(--blue-900); }
+.anim-overview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; margin-top: 10px; }
+.anim-thumb { display: grid; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: #0a1b33; color: #cfe0f5; text-align: left; cursor: pointer; }
+.anim-thumb svg { display: block; width: 100%; height: auto; border-radius: 6px; }
+.anim-thumb-cap { font-size: 12px; padding: 0 4px 2px; }
+
 /* ---------- animation preview ---------- */
 .scene-preview { margin: 0.75rem 0; }
 .scene-stage { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #0a1b33; aspect-ratio: 16 / 9; }

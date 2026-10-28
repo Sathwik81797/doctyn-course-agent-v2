@@ -51,6 +51,18 @@ before(async () => {
 });
 after(() => server.close());
 
+describe("migration helper: live sign-in check", () => {
+  it("accepts the live password, rejects a wrong one, and never echoes either", async () => {
+    const { checkLiveLogin } = await import("../src/migration/targets.js");
+    const good = await checkLiveLogin(base, "doc@example.com", "correct horse battery");
+    assert.equal(good.level, "info");
+    const bad = await checkLiveLogin(base, "doc@example.com", "wrong password here");
+    assert.equal(bad.level, "error");
+    for (const f of [good, bad]) assert.ok(!/correct horse|wrong password here/.test(f.text));
+    assert.equal((await checkLiveLogin("http://127.0.0.1:1", "doc@example.com", "x")).level, "error");
+  });
+});
+
 describe("library configuration", () => {
   it("is used only when configured and no database is configured", () => {
     const ok = { BLOB_READ_WRITE_TOKEN: TOKEN, APP_SECRET: SECRET, LIBRARY_USERS: users };

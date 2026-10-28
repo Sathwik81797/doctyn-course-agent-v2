@@ -8,6 +8,7 @@
  * the reviewer should look at is returned as `assumptions` and becomes a clinical flag.
  */
 import type { Analysis, Category, SlidePlan, TemplateId } from "../types.js";
+import { analyzeSlideText, type SlideStructure } from "./structure.js";
 import { findPhrase, normalizeWord, wordTimings } from "./timing.js";
 
 export interface DeriveSource {
@@ -15,6 +16,42 @@ export interface DeriveSource {
   title: string;
   narration: string;
   slideText: string[];
+  /** Normalised lines that repeat across the deck (header / footer / brand line): ignored as content. */
+  boilerplate?: string[];
+}
+
+const structures = new WeakMap<DeriveSource, SlideStructure>();
+/** The slide's layout read from its text (cached per source object). */
+export function structureOf(src: DeriveSource): SlideStructure {
+  let s = structures.get(src);
+  if (!s) {
+    s = analyzeSlideText(src.title, src.slideText, src.boilerplate ?? []);
+    structures.set(src, s);
+  }
+  return s;
+}
+
+/** Pictograms available to the scenes, chosen from a label's own words. Symbolic only: no anatomy is implied. */
+export const ICONS: Array<[id: string, match: RegExp]> = [
+  ["infection", /\b(infect\w*|bacteri\w*|microb\w*|pathogen\w*|sepsis|source of)\b/i],
+  ["inflammation", /\b(inflamm\w*|cytokine\w*|immune|host response|dysregulat\w*)\b/i],
+  ["alert", /\b(deteriorat\w*|escalat\w*|urgent\w*|alert\w*|warning|red flag|emergenc\w*)\b/i],
+  ["brain", /\b(mental|confus\w*|brain|neuro\w*|conscious\w*|alertness|delirium)\b/i],
+  ["lungs", /\b(oxygen\w*|respirat\w*|breath\w*|tachypn\w*|lung\w*|airway|ventilat\w*)\b/i],
+  ["kidney", /\b(urine|urinary|kidney\w*|renal)\b/i],
+  ["heart", /\b(heart|cardiac|rhythm|cardio\w*)\b/i],
+  ["pressure", /\b(hypotens\w*|blood pressure|perfusion|circulat\w*|shock)\b/i],
+  ["vessel", /\b(vascul\w*|endotheli\w*|microcircul\w*|microvascul\w*|capillar\w*|vessel\w*)\b/i],
+  ["flask", /\b(lab\w*|lactate|blood test\w*|samples?|cultures?|microbiolog\w*|investigat\w*|tests?)\b/i],
+  ["thermometer", /\b(fever|temperature|febrile)\b/i],
+  ["drop", /\b(fluids?|antimicrob\w*|antibiotic\w*|treatment|therapy|intervention\w*|drug\w*|medication)\b/i],
+  ["pulse", /\b(monitor\w*|reassess\w*|trends?|observation\w*|vital signs|review)\b/i],
+  ["person", /\b(patients?|clinician\w*|history|examination)\b/i],
+];
+
+export function iconFor(label: string): string | undefined {
+  const text = label.replace("|", " ");
+  return ICONS.find(([, re]) => re.test(text))?.[0];
 }
 
 export interface DerivedItem {
@@ -115,7 +152,8 @@ function sourceLines(src: DeriveSource): string[] {
   const title = clean(src.title).toLowerCase();
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const raw of src.slideText) {
+  // the slide's own content lines: no header/footer, counters, step numbers, arrows, section headings or subtitle
+  for (const raw of structureOf(src).items) {
     const t = clean(raw);
     const k = t.toLowerCase();
     if (t.length < 4 || t.length > 260 || k === title || /^[\d\s./-]+$/.test(t) || seen.has(k)) continue;
@@ -185,6 +223,23 @@ function organsIn(text: string): string[] {
 
 // ---------- per-template derivation (each returns null when the content cannot fill it) ----------
 
+const PROCEDURAL = /\b(assess\w*|manag\w+|approach|steps?|workflow|protocol|algorithm|treat\w*|escalat\w*|reassess\w*|investigat\w*|diagnos\w+|screen\w*|resuscitat\w*|checklist|bundle)\b/i;
+const PARALLEL = /\b(parallel|simultaneous\w*|at the same time|concurrent\w*|together)\b/i;
+const GENERIC_TITLE = /^(introduction|welcome|overview|agenda|objectives|learning objectives|outline|thank you|questions|references|disclaimer|contents)\b/i;
+
+/** Numbered boxes / arrows on a slide can mean cause → effect, ordered steps, or things done at the same time. */
+function sequenceKind(src: DeriveSource): "parallel" | "workflow" | "pathway" {
+  const st = structureOf(src);
+  if (PARALLEL.test(`${src.title} ${st.subtitle ?? ""}`) || /\b(in parallel|simultaneous\w*|at the same time|concurrent\w*)\b/i.test(src.narration)) return "parallel";
+  if (PROCEDURAL.test(src.title)) return "workflow";
+  return "pathway";
+}
+
+/** A title / opening slide: no list of items on it is a pathway or a set of contributors. */
+function isCover(src: DeriveSource): boolean {
+  return GENERIC_TITLE.test(src.title.trim()) || (src.slide === 1 && /^(welcome|hello|in this (module|lesson|course|session)|this (module|lesson|course|session))\b/i.test(src.narration.trim()));
+}
+
 type Out = { params: SlidePlan["params"]; items: DerivedItem[]; assumptions: string[]; analysis: Pick<Analysis, "mechanism" | "objective"> } | null;
 
 function pathwayOut(src: DeriveSource, min: number): Out {
@@ -206,9 +261,11 @@ function pathwayOut(src: DeriveSource, min: number): Out {
   }
   nodes = nodes.slice(0, 5);
   if (nodes.length < min) return null;
-  const items: DerivedItem[] = nodes.map((n, i) => item(`n${i + 1}`, headSub(n, 40, 100), src.narration, { description: `Step ${i + 1}: ${clip(n, 40)}` }));
+  const items: DerivedItem[] = nodes.map((n, i) => item(`n${i + 1}`, headSub(n, 56, 100), src.narration, { description: `Step ${i + 1}: ${clip(n, 40)}` }));
   const tk = lastTakeaway(splitSentences(src.narration));
+  const sub = structureOf(src).subtitle;
   if (tk) items.push(item("note", clip(tk, 150), src.narration, { free: true, description: "Take-home note" }));
+  else if (sub) items.push(item("note", clip(sub, 150), src.narration, { free: true, description: "Slide subtitle" }));
   const escalate = /\b(worsen|progress|severe|complication|failure|irreversible|advanced|damage)\w*/i.test(src.narration);
   return {
     params: { escalate },
@@ -234,14 +291,14 @@ function convergeOut(src: DeriveSource, min: number): Out {
   const list = listFrom(src);
   if (list.length < min) return null;
   const sents = splitSentences(src.narration);
-  const concl = lastTakeaway(sents) ?? sents[sents.length - 1] ?? src.title;
-  const items: DerivedItem[] = list.map((l, i) => item(`s${i + 1}`, headSub(l, 40, 60), src.narration, { free: true, description: `Contributor ${i + 1}: ${clip(l, 36)}` }));
+  const concl = structureOf(src).subtitle ?? lastTakeaway(sents) ?? sents[sents.length - 1] ?? src.title;
+  const items: DerivedItem[] = list.map((l, i) => item(`s${i + 1}`, headSub(l, 56, 60), src.narration, { free: true, description: `Contributor ${i + 1}: ${clip(l, 36)}` }));
   const head = trimEnd(clean(src.title));
   items.push(item("out", `${clip(head, 44)}|${clip(cap(trimEnd(concl)), 120)}`, src.narration, { free: true, description: "Conclusion" }, "sub"));
   return {
     params: {},
     items,
-    assumptions: ["The arrows show the listed items feeding the stated conclusion; they illustrate the slide's wording, not additional mechanism."],
+    assumptions: [sequenceKind(src) === "parallel" ? "The items are drawn side by side and feed one outcome because the slide says they happen together; no order or priority is implied." : "The arrows show the listed items feeding the stated conclusion; they illustrate the slide's wording, not additional mechanism."],
     analysis: { mechanism: list.map((l) => clip(l, 40)).join(" + ").slice(0, 300), objective: `Recognise the factors that together explain "${clip(head, 60)}".` },
   };
 }
@@ -344,7 +401,7 @@ function workflowOut(src: DeriveSource, min: number): Out {
   const sents = splitSentences(src.narration);
   const bullets = sourceLines(src);
   const steps: string[] = [];
-  if (bullets.length >= 3 && bullets.length <= 8 && (count(WORKFLOW, src.title + " " + bullets.join(" ")) > 0 || /\bstep\s*\d/i.test(bullets.join(" ")))) steps.push(...bullets);
+  if (bullets.length >= 3 && bullets.length <= 8 && (count(WORKFLOW, src.title + " " + bullets.join(" ")) > 0 || /\bstep\s*\d/i.test(bullets.join(" ")) || structureOf(src).sequence || PROCEDURAL.test(src.title))) steps.push(...bullets);
   else {
     for (const s of sents) {
       if (takeaway(s)) continue;
@@ -360,7 +417,7 @@ function workflowOut(src: DeriveSource, min: number): Out {
     const kind = /^(if|when|in patients? (?:with|who)|whether|where)\b/i.test(clean(s)) || /\bif\b.{3,80},/i.test(s) || conditional.some((x) => similar(s, x)) ? "decision" : i === 0 ? "start" : "action";
     params[`w${i + 1}.kind`] = kind;
     const body = clean(s).replace(/^(first|then|next|finally|also|after that)[,:]?\s+/i, "");
-    return item(`w${i + 1}`, headSub(body, 44, 90), src.narration, { description: `Step ${i + 1}: ${clip(body, 40)}` });
+    return item(`w${i + 1}`, headSub(body, 60, 90), src.narration, { description: `Step ${i + 1}: ${clip(body, 40)}` });
   });
   return {
     params,
@@ -395,7 +452,39 @@ function organOut(src: DeriveSource, min: number): Out {
   };
 }
 
+const PANEL_KIND: Array<[RegExp, string]> = [
+  [/present|history|patient|scenario|complaint|background/i, "profile"],
+  [/finding|investigat|exam|lab|result|vital|observ/i, "labs"],
+  [/interpret|diagnos|impression/i, "interp"],
+  [/respon|manag|plan|pathway|treat|action|next/i, "plan"],
+];
+const titleCase = (s: string): string => cap(s.toLowerCase());
+
+/** A case laid out by the slide itself: each ALL-CAPS heading is a panel and the lines under it are its lines. */
+function caseFromSections(src: DeriveSource, min: number): Out {
+  const st = structureOf(src);
+  const panels = st.sections.filter((s) => s.lines.length > 0).slice(0, 3);
+  if (panels.length < Math.max(1, min)) return null;
+  const params: SlidePlan["params"] = { panels: panels.length, build: /\b(obes\w+|overweight)\b/i.test(src.narration) ? "obese" : /\b(lean|thin|underweight)\b/i.test(src.narration) ? "lean" : "average" };
+  const items: DerivedItem[] = [];
+  panels.forEach((sec, i) => {
+    const p = `p${i + 1}`;
+    const kind = PANEL_KIND.find(([re]) => re.test(sec.header))?.[1] ?? (i === 0 ? "profile" : "labs");
+    params[`${p}.kind`] = kind;
+    items.push(item(p, titleCase(sec.header), src.narration, { description: `Panel: ${titleCase(sec.header)}` }));
+    sec.lines.slice(0, 4).forEach((l, j) => items.push(item(`${p}.l${j + 1}`, clip(cap(trimEnd(l)), 86), src.narration, { description: `${titleCase(sec.header)}: ${clip(l, 36)}` })));
+  });
+  return {
+    params,
+    items,
+    assumptions: ["The patient figure is a generic body-build icon. The panels and their lines are the slide's own headings and wording; confirm each line is under the right heading."],
+    analysis: { mechanism: panels.map((p) => titleCase(p.header)).join(" → "), objective: "Apply the approach to the case on the slide." },
+  };
+}
+
 function caseOut(src: DeriveSource, min: number): Out {
+  const fromSections = caseFromSections(src, min);
+  if (fromSections) return fromSections;
   const sents = splitSentences(src.narration);
   const bullets = sourceLines(src);
   const profile: string[] = [];
@@ -488,8 +577,32 @@ function analysisOf(template: TemplateId, src: DeriveSource, o: NonNullable<Out>
   let category: Category = CATEGORY[template] ?? "general";
   const hay = `${src.title} ${src.narration}`;
   if (template === "workflow") category = /\b(diagnos|work-?up|investigat|evaluation|screen)\w*/i.test(hay) && !/\b(treat|therapy|manage|start|drug)\w*/i.test(hay) ? "diagnostic-workflow" : "treatment-algorithm";
+  if (template === "converge" && /\b(recogni\w+|signs?|symptoms?|presentation|deteriorat\w*|takeaways?|summary|response|priorit\w+)\b/i.test(hay)) category = "clinical-pathway";
   if (template === "pathway") category = /\b(normal|physiolog\w+|regulat\w+|homeostasis)\b/i.test(hay) && !/\b(disease|damage|failure|injury|pathophys\w+|complication)\b/i.test(hay) ? "physiology" : /\b(patient|presents?|referral|care pathway)\b/i.test(hay) && count(CAUSAL_COUNT, hay) === 0 ? "clinical-pathway" : "pathophysiology";
   return { category, topic: clip(clean(src.title), 120), objective: (o.analysis.objective ?? "").slice(0, 300), ...(o.analysis.mechanism ? { mechanism: o.analysis.mechanism.slice(0, 300) } : {}) };
+}
+
+/**
+ * Chained steps appear one after another. When the voice mentions them in a different order than the slide lists them
+ * (the slide says infection → response → dysfunction, the narration starts from dysfunction), anchoring each step to its cue
+ * would pile all of them at the end. Then the cues are dropped and the steps are spread evenly over the first part of the
+ * narration, in the slide's order.
+ */
+function spreadIfOutOfOrder(items: DerivedItem[], idPattern: RegExp, narration: string): void {
+  const chain = items.filter((i) => idPattern.test(i.id));
+  if (chain.length < 2) return;
+  const words = wordTimings(narration, 100);
+  const at = chain.map((i) => {
+    const hits = i.cues.map((c) => findPhrase(words, c)?.start).filter((v): v is number => v !== undefined);
+    return hits.length ? Math.min(...hits) : null;
+  });
+  const known = at.filter((v): v is number => v !== null);
+  const ordered = known.every((v, k) => k === 0 || v >= known[k - 1]!);
+  if (ordered && known.length === chain.length) return;
+  chain.forEach((i, k) => {
+    i.cues = [];
+    i.frac = Math.round((0.06 + (0.62 * k) / Math.max(1, chain.length - 1)) * 100) / 100;
+  });
 }
 
 /**
@@ -502,6 +615,13 @@ export function deriveFor(template: TemplateId, src: DeriveSource, lenient = fal
   const min = lenient ? 1 : MIN_UNITS[template] ?? 2;
   const o = fn(src, min);
   if (!o || o.items.length === 0) return null;
+  if (template === "pathway" || template === "workflow") spreadIfOutOfOrder(o.items, /^(n|w)\d+$/, src.narration);
+  if (template === "pathway" || template === "converge" || template === "workflow") {
+    for (const it of o.items) {
+      const icon = /^(n|s|w)\d+$/.test(it.id) ? iconFor(it.label) : undefined;
+      if (icon) o.params[`${it.id}.icon`] = icon;
+    }
+  }
   return {
     template,
     params: o.params,
@@ -537,7 +657,7 @@ export function rank(src: DeriveSource): Candidate[] {
     if (score > 0) c.push({ template, score, why });
   };
 
-  if (CASE.test(all)) add("case", 6 + count(CASE, all) * 2 + (/\b(case|scenario)\b/i.test(title) ? 3 : 0), "patient case wording");
+  if (CASE.test(all) || (/\b(case|scenario)\b/i.test(title) && structureOf(src).sections.length >= 1)) add("case", 6 + count(CASE, all) * 2 + (/\b(case|scenario)\b/i.test(title) ? 3 : 0) + (structureOf(src).sections.length ? 2 : 0), "patient case wording");
 
   const organs = organsIn(all);
   const anat = count(ANAT, all);
@@ -562,6 +682,19 @@ export function rank(src: DeriveSource): Candidate[] {
   if (causal >= 2) add("pathway", 3 + causal * 2 + (/\b(patho\w+|mechanism|cascade|how|why|effect)\b/i.test(title) ? 3 : 0), `${causal} cause → effect links`);
 
   if (LIST_CUE.test(all) && listFrom(src).length >= 3) add("converge", 5 + (/\b(risk factors|causes|etiolog\w+|contributors|differential|types)\b/i.test(title) ? 3 : 0), "a list of contributors to one conclusion");
+
+  // The slide's own layout (numbered boxes, arrows, a short list under a heading) is stronger evidence than narration wording.
+  const st = structureOf(src);
+  const nodes = st.items.length;
+  if (!isCover(src)) {
+    if (st.sequence && nodes >= 3 && nodes <= 5) {
+      const kind = sequenceKind(src);
+      add(kind === "parallel" ? "converge" : kind, 12, kind === "parallel" ? "numbered boxes for actions that happen together" : kind === "workflow" ? "numbered steps of a process" : "numbered boxes linked by arrows");
+    } else if (nodes >= 3 && nodes <= 6) {
+      if (PROCEDURAL.test(src.title)) add("workflow", 8, "a short list of steps under a process heading");
+      else add("converge", 6.5, "a short list of items under one heading");
+    }
+  }
 
   const tie: TemplateId[] = ["case", "organ-map", "lab-branch", "compare", "timeline", "workflow", "pathway", "converge"];
   return c.sort((a, b) => b.score - a.score || tie.indexOf(a.template) - tie.indexOf(b.template));

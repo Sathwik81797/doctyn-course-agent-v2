@@ -12,6 +12,9 @@
  *   --admin EMAIL        make this migrated account an administrator (repeatable; only for accounts created now)
  *   --course-dir DIR     finished course folder (default: the output/* folder whose title matches the library entry)
  *   --manifest FILE      where the undo record is kept (default .data/library-migration.json)
+ *   --check-password     verify that the password in $LIBRARY_PASSWORD matches the owner's hash (plan) or the stored account (verify);
+ *                        the password and the hash are never printed
+ *   --check-live         also sign in once on the live library site with $LIBRARY_PASSWORD (proves it is the password people use today)
  *   --yes                required by `apply`
  *   --apply              required by `rollback` to actually remove things
  */
@@ -22,6 +25,8 @@ import { LIBRARY_VIDEOS } from "../cloud/library-catalog.js";
 import { cloudConfig, configProblems } from "../cloud/config.js";
 import { getContext } from "../cloud/context.js";
 import type { Ctx } from "../cloud/routes.js";
+import { verifyPassword } from "../cloud/auth.js";
+import { checkLiveLogin, inspectTargets } from "./migration/targets.js";
 import { applyMigration, parseUsersStrict, planMigration, rollbackMigration, verifyMigration, type Finding, type MigrationInput } from "./migration/library-migration.js";
 import { formatError } from "./utils/errors.js";
 import { PROJECT_ROOT } from "./utils/config.js";
@@ -57,12 +62,19 @@ async function main(): Promise<void> {
   const hasDb = Boolean(config.databaseUrl);
 
   let ctx: Ctx | null = null;
-  if (hasDb) {
+  let targets: Awaited<ReturnType<typeof inspectTargets>> | null = null;
+  if (cmd === "plan") {
+    // The dry run only SELECTs: it never creates tables (getContext would), so it can be run against an empty production database.
+    const problems = configProblems(config);
+    if (problems.length) throw new Error(`The settings are incomplete:\n- ${problems.join("\n- ")}`);
+    targets = await inspectTargets(config);
+    if (targets.db === "ready") ctx = await getContext();
+  } else if (!hasDb) {
+    throw new Error(`${cmd} needs DATABASE_URL (your Neon connection string) and STORAGE_DRIVER=blob. Only "plan" runs without them.`);
+  } else {
     const problems = configProblems(config);
     if (problems.length) throw new Error(`The database/storage settings are incomplete:\n- ${problems.join("\n- ")}`);
     ctx = await getContext();
-  } else if (cmd !== "plan") {
-    throw new Error(`${cmd} needs DATABASE_URL and the S3_* settings in .env (the production database and bucket). Only "plan" runs without them.`);
   }
 
   if (cmd === "rollback") {
@@ -90,17 +102,31 @@ async function main(): Promise<void> {
 
   if (skipped.length) console.log(`Skipped ${skipped.length} malformed LIBRARY_USERS entr${skipped.length === 1 ? "y" : "ies"}: ${skipped.join(", ")}`);
 
+  /** Compare $LIBRARY_PASSWORD with a hash without printing either. */
+  const checkPassword = async (hash: string | undefined, where: string): Promise<Finding> => {
+    const pw = process.env.LIBRARY_PASSWORD ?? "";
+    if (!pw) return { level: "error", text: "--check-password needs the owner's password in $LIBRARY_PASSWORD (read -s -p \"Password: \" LIBRARY_PASSWORD; export LIBRARY_PASSWORD)." };
+    if (!hash) return { level: "error", text: `No password hash for ${input.owner} ${where}.` };
+    return (await verifyPassword(pw, hash)) ? { level: "info", text: `The password you typed matches ${input.owner}'s hash ${where}.` } : { level: "error", text: `The password you typed does NOT match ${input.owner}'s hash ${where}.` };
+  };
+
   if (cmd === "verify") {
     const findings = await verifyMigration(ctx!, input);
+    if (args.includes("--check-password")) findings.push(await checkPassword((await ctx!.db.query("SELECT password_hash FROM users WHERE email = $1", [input.owner])).rows[0]?.password_hash, "in the database"));
     findings.forEach(print);
     await ctx!.db.close();
     process.exit(findings.some((f) => f.level === "error") ? 1 : 0);
   }
 
   const plan = await planMigration(ctx, input);
+  if (targets) plan.findings.push(...targets.findings);
+  if (args.includes("--check-password")) plan.findings.push(await checkPassword(input.users.get(input.owner), "in your users file"));
+  if (args.includes("--check-live")) plan.findings.push(await checkLiveLogin(process.env.LIVE_SITE_URL || "https://doctyn-course-agent-v2.vercel.app", input.owner, process.env.LIBRARY_PASSWORD ?? ""));
+  plan.ok = !plan.findings.some((f) => f.level === "error");
+  if (targets && targets.db !== "ready" && targets.db !== "unreachable" && targets.db !== "not-configured") plan.databaseChecked = true;
   console.log(`Library migration — ${cmd === "apply" ? "APPLY" : "dry run (nothing is written)"}`);
   console.log(`  source folder : ${input.courseDir}`);
-  console.log(`  database      : ${ctx ? "connected" : "not configured (assuming every account is new)"}`);
+  console.log(`  database      : ${ctx ? "connected, schema present" : targets ? `Neon: ${targets.db} (read-only check; every account is treated as new)` : "not configured"}`);
   console.log(`  owner         : ${input.owner}      video copies: ${share === "all" ? "one per user" : "owner only"}`);
   if (plan.video) console.log(`  video         : "${plan.video.title}" · ${plan.video.slideCount} slides · ${(plan.video.durationSeconds / 60).toFixed(1)} min · enhanced ${plan.video.enhanced.toUpperCase()} · ${(plan.video.perCopyBytes / 1048576).toFixed(0)} MB to store per copy${args.includes("--no-cache") ? " (no cache)" : ""}`);
   console.log(`  storage       : ${config.storageDriver}${config.storageDriver === "blob" ? ` (folder ${config.blob.prefix}/, existing library files are never written)` : ""}`);

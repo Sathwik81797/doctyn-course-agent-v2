@@ -86,7 +86,7 @@ describe("dashboard in private video-library mode", () => {
     assert.match(text, /52 slides/);
     assert.match(text, /15m 15s/);
     assert.match(text, /Draft/);
-    assert.deepEqual([...card.querySelectorAll(".version-chips .badge")].map((b) => b.textContent), ["Enhanced draft"]);
+    assert.deepEqual([...card.querySelectorAll(".version-chips .badge")].map((b) => b.textContent), ["Enhanced animated draft"]);
     const labels = [...card.querySelectorAll("button, a")].map((b) => b.textContent?.trim());
     assert.ok(labels.includes("Play"));
     assert.ok(labels.includes("↓ Download MP4"));
@@ -105,7 +105,7 @@ describe("dashboard in private video-library mode", () => {
     [...card.querySelectorAll("button")].find((b) => b.textContent === "Play")!.click();
     assert.ok(doc.getElementById("player")!.hasAttribute("open"));
     assert.equal(doc.getElementById("player-video")!.getAttribute("src"), `/api/v3/route?p=courses%2F${id}%2Ffiles%2Fanimated`);
-    assert.match(doc.getElementById("player-title")!.textContent ?? "", /Enhanced draft/);
+    assert.match(doc.getElementById("player-title")!.textContent ?? "", /Enhanced animated draft/);
     assert.match(doc.getElementById("player-meta")!.textContent ?? "", /DRAFT: not clinically approved — private to your account/);
     win.close();
   });

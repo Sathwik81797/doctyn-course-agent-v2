@@ -56,7 +56,7 @@ export type Popup = z.infer<typeof PopupSchema>;
 
 export const ClinicalFlagSchema = z.object({
   id: z.string(),
-  kind: z.enum(["numeric-claim", "drug", "ai-content", "template-assumption"]),
+  kind: z.enum(["numeric-claim", "drug", "ai-content", "template-assumption", "generic-animation"]),
   text: z.string().max(300),
   acknowledged: z.boolean(),
 });
@@ -127,6 +127,8 @@ export const CoursePlanSchema = z.object({
   slug: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  /** Normalised header / footer lines that repeat across the deck; ignored when a slide is re-analysed after an edit. */
+  boilerplate: z.array(z.string()).optional(),
   slides: z.array(SlidePlanSchema),
 });
 export type CoursePlan = z.infer<typeof CoursePlanSchema>;

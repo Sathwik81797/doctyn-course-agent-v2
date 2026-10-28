@@ -163,7 +163,11 @@ export async function createDb(config) {
       await boot.query(`CREATE SCHEMA IF NOT EXISTS "${config.dbSchema}"`);
       await boot.end();
     }
-    const pool = new pg.Pool({ ...base, max: config.production ? 3 : 10, ...(config.dbSchema ? { options: `-c search_path=${config.dbSchema}` } : {}) });
+    const pool = new pg.Pool({ ...base, max: config.production ? 3 : 10, keepAlive: true, ...(config.dbSchema ? { options: `-c search_path=${config.dbSchema}` } : {}) });
+    // Hosted Postgres (Neon) closes idle connections. pg emits that on the pool, and an unhandled 'error' event would crash the
+    // whole process (the Windows engine during a long render, or the serverless function). The broken client is discarded and
+    // the next query simply opens a new one.
+    pool.on("error", (err) => console.error(`[db] an idle database connection was closed (${err.message}); a new one will be opened when needed.`));
     /** @param {{ query: (t: string, p?: any[]) => Promise<any> }} c @returns {Queryable} */
     const wrap = (c) => ({ query: (t, p) => c.query(t, p).then((r) => ({ rows: r.rows, rowCount: r.rowCount ?? 0 })), exec: (t) => c.query(t) });
     db = {

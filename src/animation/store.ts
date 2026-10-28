@@ -71,6 +71,7 @@ export function applyEdit(plan: CoursePlan, n: number, rawEdit: unknown): SlideP
         slideText: edit.slideText ?? slide.slideText,
         durationSeconds: slide.durationSeconds,
         durationSource: slide.durationSource,
+        ...(plan.boilerplate ? { boilerplate: plan.boilerplate } : {}),
       },
       { template: edit.template, rationale: "Chosen manually in the studio." },
     );

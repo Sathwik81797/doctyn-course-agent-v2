@@ -47,11 +47,43 @@ template the slide cannot fill (not enough matching text) is ignored, and any pe
 Model: `ANIMATION_AI_MODEL` (default `gpt-4o-mini`). Cost is a few thousand tokens per slide — on the order of a cent or two per
 52-slide course; check current OpenAI pricing.
 
+## Reading the slide's own layout (added after the Sepsis demo)
+
+A designed PPTX carries more structure than a flat text list. The planner now reads it (`scene/structure.ts`):
+
+* Lines repeated on 40% or more of the slides (brand line, "Educational demonstration only…") and counters such as `03/09` are
+  layout, never content. Soft line breaks (`<a:br/>`) split into separate lines.
+* Numbered boxes and arrows (`01 → 02 → 03`) mark a sequence. It becomes a **pathway** (cause → effect), a **workflow**
+  (title says assess / respond / manage / escalate…) or, when the slide or narration says the actions happen together
+  ("parallel", "together"), items **converging** on one outcome, drawn side by side with no order implied.
+* ALL-CAPS headings (CLINICAL PRESENTATION, RESPONSE PATHWAY) become the panels of a **patient case**; the line under the title is
+  the subtitle and becomes the take-home note / conclusion.
+* A short bullet list under a heading becomes contributors → conclusion, or ordered steps when the heading is procedural.
+  Opening slides ("Welcome…", "Overview") are never read as a list.
+* If the narration mentions the steps in a different order than the slide lists them, the cues are dropped and the steps are
+  spread over the first part of the narration in the slide's order, so the diagram never piles up at the end.
+* Pictograms (infection, inflammation, vessels, lungs, brain, kidney, heart, pressure gauge, flask, thermometer, drop, pulse, alert,
+  person) are chosen from a label's own words. They are symbols, not anatomy, and are listed as template assumptions.
+
+A slide that still ends up with generic key-point cards is **flagged** (`generic-animation` flag, a "generic" badge in the slide
+list, an "Animation overview" panel of thumbnails in the editor, and a line on the video card such as "8 of 9 slides have a
+topic-specific scene; generic key-point cards on slide 1"). In Generated Videos the **Enhanced animated draft** is the first and
+default version; **Original narrated slides** is the optional second one. The enhanced video is rendered automatically right
+after the narrated one; nothing has to be clicked.
+
+Run any deck through the whole pipeline on this PC (Kokoro voice, nothing uploaded anywhere) and measure the motion:
+`npm run cloud:demo -- slides.pptx voiceover.docx --out output/<folder>`.
+
 ## Limits
 
 * Rule-based recognition reads English text and the patterns above; a slide that mixes several structures gets the strongest one.
 * `organ-map` knows 11 organs at standard schematic positions (patient facing the viewer); anything else is not drawn.
 * `pathway` shows up to 5 steps, `timeline` 4 points, `workflow` 6 steps, `compare` 4 rows, `converge` 6 contributors, `case` 3 panels.
   Extra material stays in the narration and pop-ups.
+* **These scenes do not match the custom diabetes animations.** The diabetes video has hand-built illustrations (muscle cell, GLUT4,
+  β-cell, OGTT curves, HOMA-IR scale…). A new topic gets structured clinical diagrams — flows, converging factors, steps, a case
+  board, timelines, comparisons, organ markers — with symbolic icons and synchronised build-up. Bespoke mechanism artwork for a
+  new topic still has to be authored.
+* A cover slide, or a slide whose content is a free paragraph, still gets generic cards (and is flagged).
 * The scenes are structural diagrams, not anatomical or pharmacological illustrations. The software flags AI-derived wording and
   gates publication on a reviewer's approval; it cannot judge clinical correctness.

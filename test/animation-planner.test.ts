@@ -37,10 +37,11 @@ describe("non-diabetes course (acute coronary syndromes): topic-driven animation
     });
     const specialised = got.filter((p) => p.template !== "key-points").length;
     assert.ok(specialised >= 8, `${specialised} of ${got.length} slides have a clinical scene`);
-    // only the introduction and the take-home summary may fall back to generic cards
+    // only the introduction falls back to generic cards; the take-home summary is drawn as points feeding its message
+    assert.equal(got[9]!.template, "converge");
     assert.deepEqual(
       got.map((p, i) => (p.template === "key-points" ? i + 1 : 0)).filter(Boolean),
-      [1, 10],
+      [1],
     );
   });
 

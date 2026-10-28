@@ -70,7 +70,7 @@ export function toCourse(r, detail = false) {
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     completedAt: r.completed_at,
-    animation: r.animation ? { planned: true, rendered: Boolean(r.animation.rendered), draft: r.animation.draft ?? null, slideCount: r.animation.slides?.length ?? 0 } : null,
+    animation: r.animation ? { planned: true, rendered: Boolean(r.animation.rendered), draft: r.animation.draft ?? null, slideCount: r.animation.slides?.length ?? 0, genericSlides: (r.animation.slides ?? []).filter((/** @type {any} */ s) => s.template === "key-points").map((/** @type {any} */ s) => s.slide) } : null,
     animatedDraft: outputs.animated ? Boolean(outputs.animated.draft) : null,
     slidePreviews: Boolean(r.slide_previews),
     ...(detail ? { previews: Object.fromEntries(Object.entries(r.previews ?? {}).map(([n, p]) => [n, { at: p.at, stale: p.hash !== narrationHash(String(r.slides.find((/** @type {any} */ x) => x.slide === Number(n))?.narration ?? "")) }])), slides: r.slides, validation: r.validation, animationPlan: r.animation?.slides ?? null, animationEdits: r.animation_edits ?? {} } : {}),

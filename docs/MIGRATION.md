@@ -9,7 +9,7 @@ run first — without touching the live site.
 
 | It does | It never does |
 |---|---|
-| Creates a Postgres account for each `LIBRARY_USERS` entry with the **same scrypt hash** (same passwords) | Read, write or delete anything in the private Vercel Blob store |
+| Creates a Postgres account for each `LIBRARY_USERS` entry with the **same scrypt hash** (same passwords) | Write or delete anything in the private Vercel Blob store (on Blob storage it only reads the size of the library video and references it read-only) |
 | Leaves an account that already exists exactly as it is (password and role) | Change Vercel settings, redeploy, or switch the live site's mode |
 | Imports the finished course from `output/<course>/` (the file whose size matches the Blob object) into the owner's library — or each user's, with `--share all` | Re-render, re-record or publish anything |
 | Keeps the enhanced video a **DRAFT** (0 of 52 slides approved), private to each account | Approve or publish a video |
@@ -18,12 +18,14 @@ run first — without touching the live site.
 
 ## Steps (nothing here changes the live site until step 6)
 
-0. Have the target services ready (Postgres, private bucket with CORS) — see `docs/ACTIVATION-CHECKLIST.md`. Put `APP_SECRET`,
-   `DATABASE_URL` and `S3_*` in the PC's `.env` (never in the repo).
+0. Have the target services ready (Neon Postgres and the private Vercel Blob store) — see `docs/BLOB-STORAGE.md`. The PC needs
+   `DATABASE_URL`, `STORAGE_DRIVER=blob`, `BLOB_READ_WRITE_TOKEN` and any 32+ character `APP_SECRET` (never in the repo).
+   `npm run engine:check` verifies all of it read-only. The exact commands for the real run are in `docs/PRODUCTION-RUNBOOK.md`.
 1. Collect the library users. The production `LIBRARY_USERS` is a hidden Vercel secret and cannot be read back; put the same
    `email=scrypt$…` entries in a file (one per line) — your password manager or the shell where you created them. Lost them?
    create new ones with `npm run library:hash-password`.
-2. **Dry run** (works without any database; with `DATABASE_URL` it also reports what already exists):
+2. **Dry run** (read-only: with `DATABASE_URL` it inspects Neon with SELECTs and never creates tables; add `--check-password` and
+   `--check-live` to prove the hash/password):
    ```bash
    npm run library:migrate -- plan --users-file users.txt --owner you@example.com --admin you@example.com
    # add --share all to give every migrated user a private copy (about 260 MB each, including the reusable audio/segment cache)
@@ -38,7 +40,7 @@ run first — without touching the live site.
    ```
    (accounts active with the library password, the enhanced video is marked DRAFT, every stored file is in the bucket).
 5. Test on a **preview** deployment with its own preview-scoped variables; sign in as a migrated user and play the draft.
-6. Only then set `DATABASE_URL` (+ `S3_*`, `ADMIN_EMAILS`, `REGISTRATION_MODE`) on Production and redeploy.
+6. Only then set `DATABASE_URL`, `STORAGE_DRIVER=blob`, `ADMIN_EMAILS`, `REGISTRATION_MODE` on Production and redeploy.
    `/api/v3/health` must say `"mode":"full"`.
 
 ## Rollback

@@ -5,6 +5,7 @@
  */
 import { authoredFor, type Item } from "./content.js";
 import { ORGANS } from "./derive.js";
+import { pictogram } from "./icons.js";
 import { C, clamp01, fx, lerp, multiline, text, wrap } from "./kit.js";
 import type { Ctx, ElementSpec, SceneInput, TemplateDef } from "./kit.js";
 
@@ -157,6 +158,7 @@ function drawPathway(c: Ctx): string {
     s.push(rect(x, y, nw, nh, 28, C.panel, color, 4 + 3 * pulse));
     s.push(`<circle cx="${fx(x + 40)}" cy="${fx(y + 40)}" r="22" fill="${color}"/>`);
     s.push(text(x + 40, y + 49, String(i + 1), 26, "#06101F", { anchor: "middle", weight: 800 }));
+    s.push(pictogram(prm<string>(c, `${id}.icon`, ""), x + nw - 52, y + 52, 58, color, 0.95 + 0.05 * Math.sin(t * 3 + i)));
     const hb = block(x + nw / 2, y + 108, nw - 50, head, head.length > 24 ? 30 : 34, C.ink, 800, "middle");
     s.push(hb.svg);
     if (sub) s.push(block(x + nw / 2, y + 108 + hb.h + 14, nw - 50, sub, compact ? 22 : 24, C.dim, 500, "middle").svg);
@@ -206,8 +208,10 @@ function drawConverge(c: Ctx): string {
       s.push(text(bx + 30, y + 50, head, 31, C.ink, { weight: 800 }));
       s.push(text(bx + 30, y + 88, sub, 26, C.dim, { weight: 500 }));
     } else {
-      s.push(block(bx + 30, y + bh / 2 + 10, bw - 140, head, 32, C.ink, 800).svg);
+      const hs = head.length > 30 ? 27 : 32;
+      s.push(block(bx + 30, y + bh / 2 + (head.length > 30 ? 0 : 10), bw - 160, head, hs, C.ink, 800).svg);
     }
+    if (!trend) s.push(pictogram(prm<string>(c, `${id}.icon`, ""), bx + bw - 56, y + bh / 2, 62, C.teal, 0.95));
     if (trend) s.push(text(bx + bw - 54, y + 76, trend.glyph, 70, trend.color, { anchor: "middle", weight: 800, opacity: 0.6 + 0.4 * Math.sin(t * 5 + i) }));
     s.push(`</g>`);
   });
@@ -897,7 +901,8 @@ function drawWorkflow(c: Ctx): string {
     s.push(rect(x, y, cw, ch, kind === "decision" ? 60 : 28, C.panel, color, 4 + 3 * c.pulse(id)));
     s.push(`<circle cx="${fx(x + 44)}" cy="${fx(y + 44)}" r="24" fill="${color}"/>`);
     s.push(text(x + 44, y + 54, kind === "decision" ? "?" : String(i + 1), 28, "#06101F", { anchor: "middle", weight: 800 }));
-    if (kind === "decision") s.push(text(x + cw - 34, y + 50, "DECISION", 20, color, { anchor: "end", weight: 800 }));
+    if (kind === "decision") s.push(text(x + 82, y + 52, "DECISION", 20, color, { weight: 800 }));
+    s.push(pictogram(prm<string>(c, `${id}.icon`, ""), x + cw - 52, y + 52, 58, color, 0.95));
     const hb = block(x + cw / 2, y + 118, cw - 60, head, head.length > 26 ? 29 : 33, C.ink, 800, "middle");
     s.push(hb.svg);
     if (sub) s.push(block(x + cw / 2, y + 118 + hb.h + 12, cw - 60, sub, 24, C.dim, 500, "middle").svg);

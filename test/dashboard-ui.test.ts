@@ -127,9 +127,9 @@ describe("single dashboard (real app.js against the real API)", () => {
     assert.match(card.querySelector(".thumb img")?.getAttribute("src") ?? "", /%2Ffiles%2Fthumbnail$/);
     assert.match(text, /Draft/);
     const chips = [...card.querySelectorAll(".version-chips .badge")].map((b) => b.textContent);
-    assert.deepEqual(chips, ["Enhanced draft", "Original"]);
+    assert.deepEqual(chips, ["Enhanced animated draft", "Original narrated slides (optional)"]);
     const labels = [...card.querySelectorAll("button, a")].map((b) => b.textContent?.trim());
-    for (const want of ["Play", "↓ Download MP4", "↓ Original MP4", "↓ VTT", "↓ SRT", "↓ Transcript", "Edit Again"]) assert.ok(labels.includes(want), `card has "${want}"`);
+    for (const want of ["Play", "↓ Download MP4", "↓ Original narrated MP4", "↓ VTT", "↓ SRT", "↓ Transcript", "Edit Again"]) assert.ok(labels.includes(want), `card has "${want}"`);
     const href = (card.querySelector("a[href*='files%2Fanimated']") as HTMLAnchorElement).getAttribute("href");
     assert.match(href ?? "", /^\/api\/v3\/route\?p=courses%2F[^&]+%2Ffiles%2Fanimated&download=1$/);
   });
@@ -139,11 +139,11 @@ describe("single dashboard (real app.js against the real API)", () => {
     const dialog = $("#player") as HTMLDialogElement;
     assert.ok(dialog.hasAttribute("open"));
     assert.match(($("#player-video") as HTMLVideoElement).getAttribute("src") ?? "", /%2Ffiles%2Fanimated$/);
-    assert.match($("#player-title").textContent ?? "", /Enhanced draft/);
+    assert.match($("#player-title").textContent ?? "", /Enhanced animated draft/);
     assert.match($("#player-meta").textContent ?? "", /DRAFT: not clinically approved/);
     assert.ok($("#player-video track[src$='files%2Fvtt']"), "captions attached");
     const tabs = $$("#player-versions .tab");
-    assert.deepEqual(tabs.map((t) => t.textContent), ["Enhanced draft", "Original (narrated slides)"]);
+    assert.deepEqual(tabs.map((t) => t.textContent), ["Enhanced animated draft", "Original narrated slides"]);
     tabs[1]!.click();
     assert.match(($("#player-video") as HTMLVideoElement).getAttribute("src") ?? "", /%2Ffiles%2Fvideo$/);
     $("#player-close").click();

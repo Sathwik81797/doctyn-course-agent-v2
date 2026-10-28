@@ -697,11 +697,22 @@ function renderActivity() {
 function versionsOf(c) {
   const list = [];
   if (c.available.animated) {
-    if (c.animatedDraft === false) list.push({ key: "approved", file: "animated", label: "Clinically approved final", short: "Approved final", cls: "badge-complete" });
-    else list.push({ key: "draft", file: "animated", label: "Enhanced draft", short: "Enhanced draft", cls: "badge-cancelled" });
+    if (c.animatedDraft === false) list.push({ key: "approved", file: "animated", label: "Clinically approved animated final", short: "Approved animated final", cls: "badge-complete" });
+    else list.push({ key: "draft", file: "animated", label: "Enhanced animated draft", short: "Enhanced animated draft", cls: "badge-cancelled" });
   }
-  if (c.available.video) list.push({ key: "original", file: "video", label: "Original (narrated slides)", short: "Original", cls: "" });
+  if (c.available.video) list.push({ key: "original", file: "video", label: "Original narrated slides", short: c.available.animated ? "Original narrated slides (optional)" : "Original narrated slides", cls: "" });
   return list;
+}
+
+/** "7 of 9 slides have topic-specific animation; slides 1 use generic cards" for a course whose animation was planned. */
+function animationSummary(c) {
+  const a = c.animation;
+  if (!a || !a.slideCount) return null;
+  const generic = a.genericSlides ?? [];
+  const text = generic.length
+    ? `Animation: ${a.slideCount - generic.length} of ${a.slideCount} slides have a topic-specific scene; generic key-point cards on slide${generic.length > 1 ? "s" : ""} ${generic.join(", ")}.`
+    : `Animation: all ${a.slideCount} slides have a topic-specific scene.`;
+  return el("div", { class: "video-meta anim-summary" }, el("span", { class: generic.length ? "generic-note" : "", text }));
 }
 
 function videoCard(c) {
@@ -722,7 +733,7 @@ function videoCard(c) {
 
   const dl = [];
   if (best) dl.push(el("a", { class: "btn btn-ghost small", href: fileUrl(c, best.file, true), title: `Download ${best.label}` }, "↓ Download MP4"));
-  if (best && best.key !== "original" && c.available.video) dl.push(el("a", { class: "btn btn-ghost small", href: fileUrl(c, "video", true), title: "Download the original narrated-slides MP4" }, "↓ Original MP4"));
+  if (best && best.key !== "original" && c.available.video) dl.push(el("a", { class: "btn btn-ghost small", href: fileUrl(c, "video", true), title: "Download the optional original narrated-slides MP4" }, "↓ Original narrated MP4"));
   for (const [k, label] of [["vtt", "VTT"], ["srt", "SRT"], ["transcript", "Transcript"]]) {
     if (c.available[k]) dl.push(el("a", { class: "btn btn-ghost small", href: fileUrl(c, k, true), title: `Download ${label}` }, `↓ ${label}`));
   }
@@ -733,6 +744,7 @@ function videoCard(c) {
       el("div", { class: "row between gap" }, el("h3", { class: "video-title", text: c.title }), el("span", { class: `badge ${statusClass}`, text: statusText })),
       el("div", { class: "video-meta" }, meta.map((m) => el("span", { text: m }))),
       el("div", { class: "version-chips" }, versions.length ? versions.map((v) => el("span", { class: `badge ${v.cls}`, text: v.short })) : el("span", { class: "muted small", text: busy ? "Rendering…" : "No video yet" })),
+      animationSummary(c),
       busy && c.job ? el("div", { class: "job-mini" }, el("div", { class: "bar" }, el("span", { style: `width:${pct}%` })), el("span", { class: "small muted", text: c.job.progress?.detail ?? "Working…" })) : null,
       c.stale ? el("div", { class: "video-meta" }, el("span", { text: "Edited since this video was made — regenerate to include the edits." })) : null,
     ),
@@ -831,11 +843,39 @@ function renderEditor() {
       el("button", { type: "button", class: `slide-item${s.slide === state.editor.slide ? " selected" : ""}${!s.narration.trim() ? " missing" : ""}`, onclick: () => { state.editor.slide = s.slide; renderEditor(); } },
         el("span", { class: "slide-no", text: String(s.slide) }),
         el("span", { class: "slide-name", text: state.editor.drafts[s.slide]?.title ?? s.title }),
+        effective(c, s.slide)?.template === "key-points" ? el("span", { class: "badge badge-cancelled generic-badge", title: "Generic key-point cards: no clinical structure was recognised. Pick a better animation type.", text: "generic" }) : null,
         edited ? el("span", { class: "dot-edit", title: "Unsaved edit" }) : saved ? el("span", { class: "dot-saved", title: "Saved animation edit" }) : null,
       ));
   }));
   const pane = $("slide-pane");
-  pane.replaceChildren(slidePane(c, busy));
+  pane.replaceChildren(animationOverview(c), slidePane(c, busy));
+}
+
+/** Thumbnails of every slide's animated scene (the same renderer as the MP4), drawn when the panel is opened. */
+function animationOverview(c) {
+  const plan = c.animationPlan;
+  if (!plan?.length) return el("span");
+  const generic = plan.filter((p) => (effective(c, p.slide)?.template ?? p.template) === "key-points").length;
+  const box = el("details", { class: "anim-overview" },
+    el("summary", { text: `Animation overview — ${plan.length - generic} of ${plan.length} slides topic-specific${generic ? `, ${generic} generic` : ""}` }));
+  box.addEventListener("toggle", () => {
+    if (!box.open || box.dataset.drawn || !window.DoctynScene) return;
+    box.dataset.drawn = "1";
+    const grid = el("div", { class: "anim-overview-grid" });
+    for (const p of plan) {
+      const eff = effective(c, p.slide) ?? { template: p.template, slideText: p.slideText, popups: p.popups, events: p.events };
+      const cell = el("button", { type: "button", class: "anim-thumb", onclick: () => { state.editor.slide = p.slide; renderEditor(); } });
+      try {
+        const svg = window.DoctynScene.renderFrame({ ...p, slideText: eff.slideText, events: eff.events, popups: [], labels: { ...(p.labels ?? {}), ...(c.animationEdits?.[String(p.slide)]?.labels ?? {}) } }, p.durationSeconds * 0.85, { captions: false });
+        cell.append(document.importNode(new DOMParser().parseFromString(svg, "image/svg+xml").documentElement, true));
+      } catch { cell.append(el("span", { class: "muted small", text: "no preview" })); }
+      const isGeneric = eff.template === "key-points";
+      cell.append(el("span", { class: "anim-thumb-cap" }, `${p.slide} · ${eff.template}`, isGeneric ? el("span", { class: "badge badge-cancelled generic-badge", text: "generic" }) : null));
+      grid.append(cell);
+    }
+    box.append(grid);
+  });
+  return box;
 }
 
 function slidePane(c, busy) {

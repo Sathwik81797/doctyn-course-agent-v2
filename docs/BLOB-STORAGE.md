@@ -19,7 +19,7 @@ registered library file with a `library:<pathname>` key (the diabetes video is r
 | Vercel (website) and the PC's `.env` | `STORAGE_DRIVER` | `blob` |
 | both | `BLOB_READ_WRITE_TOKEN` | the existing token (already set on Vercel; `vercel env pull .env.local` gives the PC a copy) |
 | both | `DATABASE_URL` | your Neon connection string (pooled on Vercel; the PC may use either) |
-| both | `APP_SECRET` | the same random 32+ character value |
+| both | `APP_SECRET` | any random 32+ character value (the engine never checks sessions, so the PC's value need not equal Vercel's) |
 | Vercel | `ADMIN_EMAILS`, `REGISTRATION_MODE` | as in `docs/CLOUD.md` |
 | optional | `BLOB_PREFIX` | folder for V2 files, default `v2` (never `courses`) |
 | optional | `DB_SCHEMA` | keep the tables in their own Postgres schema (direct connection only) |

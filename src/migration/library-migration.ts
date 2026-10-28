@@ -187,7 +187,7 @@ export async function planMigration(ctx: Ctx | null, input: MigrationInput): Pro
       importedBy = new Set((await ctx.db.query("SELECT u.email FROM courses c JOIN users u ON u.id = c.owner_id WHERE c.import_key = $1 AND c.deleted_at IS NULL", [key])).rows.map((r) => r.email));
     }
   } else {
-    add("info", "No database is configured, so every account is treated as new. Set DATABASE_URL (and the S3_* settings) to check what already exists.");
+    add("info", "No existing accounts were looked up (no database is connected, or it has no tables yet), so every account is treated as new.");
   }
 
   const users: UserPlan[] = [...input.users.entries()].map(([email, hash]) => {

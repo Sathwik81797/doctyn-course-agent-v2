@@ -6,6 +6,7 @@ import { PipelineError } from "../utils/errors.js";
 import { exists, pad3 } from "../utils/files.js";
 import { analyzeSlide, type AnalysisOverride, type SlideSource } from "./analyzer.js";
 import { readSlideTexts } from "./pptx-text.js";
+import { findBoilerplate } from "./scene/structure.js";
 import { estimateSpeechSeconds, slideTotalSeconds } from "./scene/timing.js";
 import type { CoursePlan } from "./types.js";
 
@@ -29,6 +30,7 @@ export async function buildCoursePlan(
     );
   }
   const texts = await readSlideTexts(course.inputs.pptx, course.pptx.slides.map((s) => s.entry));
+  const boilerplate = findBoilerplate(texts);
   const slides = [];
   for (const rec of v.ordered) {
     const pptxSlide = course.pptx.slides[rec.number - 1]!;
@@ -49,6 +51,7 @@ export async function buildCoursePlan(
       slideText: texts[rec.number - 1] ?? [],
       durationSeconds: Math.round(durationSeconds * 100) / 100,
       durationSource,
+      ...(boilerplate.length ? { boilerplate } : {}),
     };
     let override: AnalysisOverride | null = null;
     if (opts.ai) {
@@ -63,6 +66,6 @@ export async function buildCoursePlan(
   const now = new Date().toISOString();
   return {
     courseRoot: course.paths.root,
-    plan: { version: 1, courseTitle: course.identity.title, slug: course.identity.slug, createdAt: now, updatedAt: now, slides },
+    plan: { version: 1, courseTitle: course.identity.title, slug: course.identity.slug, createdAt: now, updatedAt: now, ...(boilerplate.length ? { boilerplate } : {}), slides },
   };
 }

@@ -28,6 +28,8 @@
 
 /** @param {Record<string, string | undefined>} [env] @returns {CloudConfig} */
 export function cloudConfig(env = process.env) {
+  // Values pasted into a dashboard or piped from a shell often carry quotes or a trailing newline; accept them.
+  const clean = (/** @type {string | undefined} */ v) => (v ?? "").trim().replace(/^["']+|["']+$/g, "").trim();
   const production = Boolean(env.VERCEL) || env.NODE_ENV === "production";
   const num = (/** @type {string} */ name, /** @type {number} */ dflt) => {
     const v = Number(env[name]);
@@ -37,11 +39,11 @@ export function cloudConfig(env = process.env) {
     (v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   return {
     production,
-    databaseUrl: env.DATABASE_URL?.trim() || null,
+    databaseUrl: clean(env.DATABASE_URL) || null,
     dbSchema: env.DB_SCHEMA?.trim() || null,
     dbSslVerify: env.DATABASE_SSL?.trim() !== "no-verify",
     localDbDir: env.LOCAL_DB_DIR?.trim() || ".data/pglite",
-    storageDriver: env.STORAGE_DRIVER?.trim() === "fs" ? "fs" : env.STORAGE_DRIVER?.trim() === "blob" ? "blob" : "s3",
+    storageDriver: clean(env.STORAGE_DRIVER).toLowerCase() === "fs" ? "fs" : clean(env.STORAGE_DRIVER).toLowerCase() === "blob" ? "blob" : "s3",
     s3: {
       endpoint: env.S3_ENDPOINT?.trim() || null,
       region: env.S3_REGION?.trim() || "auto",
@@ -52,7 +54,7 @@ export function cloudConfig(env = process.env) {
     },
     blob: { token: env.BLOB_READ_WRITE_TOKEN?.trim() || null, prefix: (env.BLOB_PREFIX?.trim() || "v2").replace(/^\/+|\/+$/g, "") },
     fsRoot: env.LOCAL_STORAGE_DIR?.trim() || ".data/storage",
-    secret: env.APP_SECRET?.trim() || null,
+    secret: clean(env.APP_SECRET) || null,
     registrationMode: env.REGISTRATION_MODE === "open" ? "open" : "approval",
     adminEmails: list(env.ADMIN_EMAILS).map((e) => e.toLowerCase()),
     maxUploadBytes: num("MAX_UPLOAD_MB", 200) * 1024 * 1024,
