@@ -1,6 +1,7 @@
 // Doctyn Course Studio — the single dashboard.
 // Upload, validate, edit slides / narration / animations, generate, review and watch — all on this page.
 // Everything shown comes from the /api/v3 backend; when it (or the rendering engine) is not available the page says so.
+import { openStudio } from "./studio.js";
 import { $, el, formatBytes, formatClock, formatDuration, fullDate, svgPlay, timeAgo, toast } from "./ui.js";
 
 const API = "/api/v3";
@@ -358,7 +359,8 @@ function renderFiles() {
 
   const edit = $("edit-btn");
   edit.hidden = !(c && c.slides?.length);
-  edit.textContent = state.editor.open ? "Hide editor" : "Edit Course";
+  edit.textContent = state.editor.open ? "Hide quick edit" : "Quick edit";
+  $("studio-btn").hidden = !(c && c.slides?.length);
 
   const up = $("upload-btn");
   const { pptx, docx } = state.selected;
@@ -803,6 +805,34 @@ function closePlayer() {
   $("player").close();
 }
 
+// ---------- slide editor workspace (public/studio.js) ----------
+
+async function openSlideEditor() {
+  const c = state.course;
+  if (!c?.slides?.length) return;
+  if (dirty()) {
+    if (!confirm("Save your quick-edit changes and open the slide editor?")) return;
+    if (!(await saveEdits())) return;
+  }
+  state.editor = { open: false, slide: 1, drafts: {}, anim: {} };
+  $("editor-card").hidden = true;
+  await openStudio({
+    call,
+    apiUrl,
+    toast,
+    meta: () => state.meta,
+    generate: async () => {
+      await call("POST", `/courses/${c.id}/build`, { animate: true });
+      toast("Video generation queued. It uses everything saved in the slide editor.");
+    },
+    onClose: async () => {
+      await refreshAll();
+      renderAll({ force: true });
+      scheduleTick();
+    },
+  }, c.id);
+}
+
 // ---------- editor (inside the dashboard) ----------
 
 function openEditor() {
@@ -887,8 +917,10 @@ function slidePane(c, busy) {
   const parts = [];
 
   // preview
-  const img = c.slidePreviews
-    ? el("img", { class: "slide-img", src: apiUrl(`/courses/${c.id}/slides/${n}/image`), alt: `Slide ${n} preview`, loading: "lazy", width: "960", height: "540" })
+  // The preview image belongs to the page of the uploaded presentation the slide came from (slides can be reordered or added in the slide editor).
+  const page = s.uid ? s.origin?.page : n;
+  const img = c.slidePreviews && page
+    ? el("img", { class: "slide-img", src: apiUrl(`/courses/${c.id}/slides/${page}/image`), alt: `Slide ${n} preview`, loading: "lazy", width: "960", height: "540" })
     : el("div", { class: "slide-img placeholder" }, el("span", { text: "Slide preview is not available yet. It is rendered by the engine when the course is validated." }));
   parts.push(el("div", { class: "preview-row" },
     img,
@@ -1218,6 +1250,7 @@ function setupStatic() {
   setupDropzones();
   $("upload-btn").addEventListener("click", uploadSelected);
   $("edit-btn").addEventListener("click", () => (state.editor.open ? closeEditor() : openEditor()));
+  $("studio-btn").addEventListener("click", openSlideEditor);
   $("editor-close").addEventListener("click", closeEditor);
   $("editor-save").addEventListener("click", () => saveEdits());
   $("preview-btn").addEventListener("click", startPreview);

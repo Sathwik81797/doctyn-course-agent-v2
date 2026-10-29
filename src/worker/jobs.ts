@@ -17,7 +17,7 @@ import { convertPptxToPdf, rasterizePdf } from "../services/render-slides.js";
 import { loadConfig } from "../utils/config.js";
 import { buildVoiceoverDocx } from "./docx-builder.js";
 import { runAnimate } from "./animate-job.js";
-import { storePlan, workspace as planWorkspace, writeInputs } from "./plan.js";
+import { applyDeckEdits, storePlan, workspace as planWorkspace, writeInputs } from "./plan.js";
 
 export interface WorkerJob {
   id: string;
@@ -304,6 +304,8 @@ export async function runBuild(job: WorkerJob, parentEnv: JobEnv): Promise<void>
 
   await env.progress({ percent: 1, stage: "prepare", detail: "Fetching your presentation…" });
   await ctx.storage.downloadToFile(course.pptx_key, path.join(inputDir, "presentation.pptx"));
+  // Slide edits made in the editor are part of the video: they go into a copy of the presentation the pipeline renders.
+  if (await applyDeckEdits(course, path.join(inputDir, "presentation.pptx"))) await env.progress({ percent: 2, stage: "prepare", detail: "Applying your slide edits…" });
   await fs.writeFile(path.join(inputDir, "voiceover-script.docx"), await buildVoiceoverDocx(course.title, slides));
   const restored = await syncCacheDown(env, course.owner_id, course.id, courseDir).catch(() => 0);
 

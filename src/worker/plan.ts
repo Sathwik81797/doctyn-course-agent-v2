@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { buildEditedPptx, hasDeckEdits } from "../../cloud/editor/pptx-write.js";
 import { applyEdit, loadPlan, savePlan } from "../animation/store.js";
 import type { CoursePlan } from "../animation/types.js";
 import { ensureDir, exists } from "../utils/files.js";
@@ -36,6 +37,20 @@ export function workspace(workRoot: string, course: { id: string; title: string 
   };
 }
 
+/**
+ * The presentation the pipeline must read for this course. When the user reordered, added, deleted or changed slides in the editor,
+ * the saved edits are written into a COPY of the uploaded PPTX (the upload itself is never modified), so slide rendering, the animation
+ * planner, captions and the final video all see exactly what the editor showed. Untouched courses use the upload as it is.
+ */
+export async function applyDeckEdits(course: any, pptxPath: string): Promise<boolean> {
+  const slides = (course.slides ?? []) as Array<{ origin?: { page: number } | null; edits?: unknown }>;
+  const originalPages = Number(course.editor_shapes?.pageCount ?? course.validation?.pptxCount ?? 0) || undefined;
+  if (!slides.some((s) => s.origin !== undefined) || !hasDeckEdits(slides as never, originalPages)) return false;
+  const edited = await buildEditedPptx(await fs.readFile(pptxPath), slides as never, course.editor_shapes ?? undefined);
+  await fs.writeFile(pptxPath, edited);
+  return true;
+}
+
 /** Put the saved (edited) slides into the input folder as the DOCX the pipeline reads. The user's originals are never touched. */
 export async function writeInputs(env: JobEnv, course: any, ws: Workspace, pptxSource?: string): Promise<void> {
   await fs.rm(ws.inputDir, { recursive: true, force: true });
@@ -43,6 +58,8 @@ export async function writeInputs(env: JobEnv, course: any, ws: Workspace, pptxS
   const target = path.join(ws.inputDir, "presentation.pptx");
   if (pptxSource) await fs.copyFile(pptxSource, target);
   else await env.ctx.storage.downloadToFile(course.pptx_key, target);
+  // (a PPTX passed in by the caller is the freshly parsed upload: there are no edits to apply yet)
+  if (!pptxSource) await applyDeckEdits(course, target);
   await fs.writeFile(path.join(ws.inputDir, "voiceover-script.docx"), await buildVoiceoverDocx(course.title, course.slides));
 }
 

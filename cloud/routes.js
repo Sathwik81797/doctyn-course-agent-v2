@@ -7,6 +7,7 @@ import {
   HttpError, audit, clearCookie, login, logout, publicUser, readJsonBody, register, sessionCookie, sessionTokenFromCookie, userForToken,
 } from "./auth.js";
 import { engineStatus, enqueue, reapStale, requestCancel, retryJob } from "./queue.js";
+import { registerEditorRoutes } from "./editor/routes.js";
 import { ANIMATION_TEMPLATES, OUTPUT_FILES, UUID_RE, cleanText, contentHash, courseKeys, narrationHash, normalizeRouteUrl, parseSlideList } from "./util.js";
 
 /** @typedef {{ config: import("./config.js").CloudConfig, db: import("./db.js").Db, storage: import("./storage.js").Storage }} Ctx */
@@ -243,10 +244,13 @@ route("POST", "/courses/:id/files/complete", "user", async (ctx, { req, res, use
       `UPDATE courses SET ${type}_key = $2, ${type}_name = $3, ${type}_bytes = $4,
               status = $5, error = NULL, slide_count = NULL, validation = NULL, slides = '[]'::jsonb,
               content_hash = NULL, built_hash = NULL, review_status = 'none', review_hash = NULL, published_at = NULL,
+              editor_shapes = NULL, editor_rev = 0, animation = NULL, animation_edits = '{}'::jsonb,
               updated_at = now() WHERE id = $1 RETURNING *`,
       [row.id, key, name, head.size, both ? "parsing" : "created"],
     );
     // The previous upload stays in storage (originals are preserved); it is removed with the course.
+    // Saved editor versions describe slides of the old files, so they go.
+    await q.query("DELETE FROM course_versions WHERE course_id = $1", [row.id]);
     void oldKey;
     if (both) await q.query("INSERT INTO jobs(course_id, owner_id, kind, max_attempts) VALUES ($1,$2,'parse',$3)", [row.id, row.owner_id, ctx.config.jobMaxAttempts]);
     return res2.rows[0];
@@ -389,7 +393,7 @@ route("POST", "/courses/:id/plan", "user", async (ctx, { res, user, params }) =>
 route("GET", "/courses/:id/slides/:n/image", "user", async (ctx, { res, user, params }) => {
   const row = await mine(ctx, user, params.id);
   const n = Number(params.n);
-  if (!row.slide_previews || !Number.isInteger(n) || n < 1 || n > (row.slide_count ?? 0)) throw new HttpError(404, "No preview image for that slide.");
+  if (!row.slide_previews || !Number.isInteger(n) || n < 1 || n > Math.max(row.slide_count ?? 0, row.validation?.pptxCount ?? 0)) throw new HttpError(404, "No preview image for that slide.");
   const url = await ctx.storage.presignGet(courseKeys(row.owner_id, row.id).slideImage(n), { contentType: "image/jpeg" });
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Location", url);
@@ -651,6 +655,8 @@ route("DELETE", "/admin/courses/:id", "user", async (ctx, { res, user, params })
   await audit(ctx.db, user.id, "admin.course.delete", params.id, {});
   sendJson(res, 200, { ok: true });
 });
+
+registerEditorRoutes({ route, mine, readJson, sendJson, toCourse, BUSY });
 
 // ---------- dispatcher ----------
 

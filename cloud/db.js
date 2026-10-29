@@ -125,6 +125,24 @@ export const MIGRATIONS = [
   ALTER TABLE courses ADD COLUMN import_key text;
   CREATE UNIQUE INDEX courses_import_key ON courses(owner_id, import_key) WHERE import_key IS NOT NULL;
   `,
+  `
+  -- Slide editor: editable shapes read from the uploaded PPTX, a revision counter for conflict detection, and saved versions.
+  ALTER TABLE courses ADD COLUMN editor_shapes jsonb;
+  ALTER TABLE courses ADD COLUMN editor_rev int NOT NULL DEFAULT 0;
+  CREATE TABLE course_versions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    course_id uuid NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    owner_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind text NOT NULL CHECK (kind IN ('original','auto','manual','restore')),
+    label text NOT NULL DEFAULT '',
+    title text NOT NULL,
+    slides jsonb NOT NULL,
+    animation_edits jsonb NOT NULL DEFAULT '{}'::jsonb,
+    content_hash text,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX course_versions_course ON course_versions(course_id, created_at DESC);
+  `,
 ];
 
 /** @param {Queryable} q */

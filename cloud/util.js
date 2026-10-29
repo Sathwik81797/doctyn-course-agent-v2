@@ -7,11 +7,22 @@ export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
  * Fingerprint of everything a viewer hears or reads: course title, slide titles and narration.
  * A clinical approval is only valid for the exact hash it was given for.
  * @param {string} title
- * @param {Array<{ slide: number, title: string, narration: string }>} slides
+ * @param {Array<{ slide: number, title: string, narration: string, uid?: string, origin?: { page: number } | null, edits?: any }>} slides
  */
 export function contentHash(title, slides) {
-  const canon = JSON.stringify([title.trim(), slides.map((s) => [s.slide, s.title.trim(), s.narration.trim()])]);
+  const rows = slides.map((s) => [s.slide, s.title.trim(), s.narration.trim()]);
+  // Visual edits from the slide editor (order, added slides, text, positions, shapes) change what viewers see, so they are
+  // part of the fingerprint too. A deck that was never edited, or was edited back to the original, keeps its original hash.
+  const visual = slides.some((s) => (s.edits && Object.keys(s.edits).length > 0) || (s.uid && (!s.origin || s.origin.page !== s.slide)));
+  const canon = JSON.stringify(visual ? [title.trim(), rows, slides.map((s) => [s.origin?.page ?? 0, canonical(s.edits ?? {})])] : [title.trim(), rows]);
   return createHash("sha256").update(canon).digest("hex");
+}
+
+/** JSON with sorted keys (Postgres jsonb does not keep key order, and a hash must not depend on it). @param {any} v @returns {string} */
+export function canonical(v) {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
+  if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}`;
+  return JSON.stringify(v) ?? "null";
 }
 
 /** Object-storage layout. Every key starts with the owner and course ids. @param {string} ownerId @param {string} courseId */
